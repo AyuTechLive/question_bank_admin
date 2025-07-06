@@ -149,6 +149,40 @@ class FirebaseService {
     }
   }
 
+// Add this method to your existing firebase_service.dart file
+
+  /// Check if a question with the same metadata already exists
+  Future<bool> questionExistsWithMetadata({
+    required String stream,
+    required String level,
+    required String topic,
+    required String subtopic,
+    required String language,
+    required String chapter,
+    required String type,
+  }) async {
+    try {
+      final questionsSnapshot = await _firestore
+          .collection('data')
+          .doc(stream)
+          .collection('questions')
+          .where('level', isEqualTo: level)
+          .where('topic', isEqualTo: topic)
+          .where('subtopic', isEqualTo: subtopic)
+          .where('language', isEqualTo: language)
+          .where('chapter', isEqualTo: chapter)
+          .where('type', isEqualTo: type)
+          .limit(1)
+          .get();
+
+      return questionsSnapshot.docs.isNotEmpty;
+    } catch (e) {
+      debugPrint('Error checking question existence: $e');
+      // If there's an error checking, allow upload to proceed
+      return false;
+    }
+  }
+
   Future<List<QuestionModel>> getAllQuestions() async {
     try {
       List<QuestionModel> allQuestions = [];

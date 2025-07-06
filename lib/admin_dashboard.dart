@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:question_bank/question_model.dart';
+import 'package:question_bank/screens/bulk_upload_screen.dart';
 import 'package:question_bank/service/firebase_service.dart';
 import 'package:question_bank/service/metadata_service.dart';
 import 'package:question_bank/widget/medta_datawidegt.dart';
@@ -87,6 +88,28 @@ class _AdminDashboardState extends State<AdminDashboard> {
       });
 
       try {
+        // Check if question with same metadata already exists
+        final isDuplicate = await _firebaseService.questionExistsWithMetadata(
+          stream: selectedStream!,
+          level: selectedLevel!,
+          topic: selectedTopic!,
+          subtopic: selectedSubtopic!,
+          language: selectedLanguage!,
+          chapter: selectedChapter!,
+          type: selectedType!,
+        );
+
+        if (isDuplicate) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  'A question with the same metadata already exists. Upload skipped.'),
+            ),
+          );
+          _resetForm();
+          return;
+        }
+
         final question = QuestionModel(
           stream: selectedStream!,
           level: selectedLevel!,
@@ -133,12 +156,32 @@ class _AdminDashboardState extends State<AdminDashboard> {
     });
   }
 
+  void _openBulkUpload() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const BulkUploadScreen(),
+      ),
+    ).then((_) {
+      // Refresh questions list when returning from bulk upload
+      _loadQuestions();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Question Bank Admin Dashboard'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        actions: [
+          // Bulk Upload Button in AppBar
+          IconButton(
+            onPressed: _openBulkUpload,
+            icon: const Icon(Icons.upload_file),
+            tooltip: 'Bulk Upload',
+          ),
+        ],
       ),
       body: Row(
         children: [
@@ -162,6 +205,29 @@ class _AdminDashboardState extends State<AdminDashboard> {
                           TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 20),
+
+                    // Bulk Upload Button
+                    ElevatedButton.icon(
+                      onPressed: _openBulkUpload,
+                      icon: const Icon(Icons.cloud_upload),
+                      label: const Text('Bulk Upload Questions'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.purple,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+
+                    const Divider(),
+                    const SizedBox(height: 20),
+
+                    const Text(
+                      'Single Question Upload',
+                      style:
+                          TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 16),
 
                     // Stream Dropdown
                     DropdownButtonFormField<String>(
@@ -403,9 +469,20 @@ class _AdminDashboardState extends State<AdminDashboard> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'Uploaded Questions',
-                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'Uploaded Questions',
+                        style: TextStyle(
+                            fontSize: 24, fontWeight: FontWeight.bold),
+                      ),
+                      Text(
+                        'Total: ${uploadedQuestions.length}',
+                        style: const TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.w500),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 20),
                   Expanded(
