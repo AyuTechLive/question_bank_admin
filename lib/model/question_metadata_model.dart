@@ -13,6 +13,10 @@ class QuestionMetadataModel {
   String? chapter;
   String? type;
 
+  // PDF file references (will be populated after conversion)
+  File? questionPdfFile;
+  File? answerPdfFile;
+
   QuestionMetadataModel({
     required this.questionFile,
     required this.answerFile,
@@ -24,6 +28,8 @@ class QuestionMetadataModel {
     this.language,
     this.chapter,
     this.type,
+    this.questionPdfFile,
+    this.answerPdfFile,
   });
 
   bool get isValid {
@@ -35,6 +41,8 @@ class QuestionMetadataModel {
         chapter != null &&
         type != null;
   }
+
+  bool get hasPdfFiles => questionPdfFile != null && answerPdfFile != null;
 
   Map<String, String?> get metadata {
     return {
@@ -58,6 +66,11 @@ class QuestionMetadataModel {
     type = other.type;
   }
 
+  void setPdfFiles(File? questionPdf, File? answerPdf) {
+    questionPdfFile = questionPdf;
+    answerPdfFile = answerPdf;
+  }
+
   QuestionMetadataModel copyWith({
     String? stream,
     String? level,
@@ -66,6 +79,8 @@ class QuestionMetadataModel {
     String? language,
     String? chapter,
     String? type,
+    File? questionPdfFile,
+    File? answerPdfFile,
   }) {
     return QuestionMetadataModel(
       questionFile: questionFile,
@@ -78,6 +93,13 @@ class QuestionMetadataModel {
       language: language ?? this.language,
       chapter: chapter ?? this.chapter,
       type: type ?? this.type,
+      questionPdfFile: questionPdfFile ?? this.questionPdfFile,
+      answerPdfFile: answerPdfFile ?? this.answerPdfFile,
     );
+  }
+
+  @override
+  String toString() {
+    return 'QuestionMetadataModel(baseName: $baseName, stream: $stream, level: $level, topic: $topic, hasPdfs: $hasPdfFiles)';
   }
 }

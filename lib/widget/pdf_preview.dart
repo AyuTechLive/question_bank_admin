@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:question_bank/service/background_conversion.dart';
 import 'package:question_bank/service/doc_converter.dart';
+import 'package:question_bank/service/local_db.dart';
 import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 
 import 'dart:io';
@@ -8,11 +9,13 @@ import 'dart:io';
 class PdfPreviewWidget extends StatefulWidget {
   final String filePath;
   final String title;
+  final int? questionPairId; // For updating local DB with PDF paths
 
   const PdfPreviewWidget({
     Key? key,
     required this.filePath,
     required this.title,
+    this.questionPairId,
   }) : super(key: key);
 
   @override
@@ -26,6 +29,7 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
   late PdfViewerController _pdfViewerController;
   final BackgroundConversionService _conversionService =
       BackgroundConversionService();
+  final LocalDatabaseService _localDb = LocalDatabaseService();
 
   @override
   void initState() {
@@ -40,28 +44,52 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
       errorMessage = null;
     });
 
-    // First check if already converted in background
-    final cachedPath = _conversionService.getCachedConversion(widget.filePath);
-
-    if (cachedPath != null) {
-      // Already converted!
+    // First check local database cache
+    final cachedPdfPath = await _localDb.getCachedPdfPath(widget.filePath);
+    if (cachedPdfPath != null && File(cachedPdfPath).existsSync()) {
       setState(() {
-        pdfPath = cachedPath;
+        pdfPath = cachedPdfPath;
         isLoading = false;
       });
+
+      // Update question pair with PDF path if needed
+      if (widget.questionPairId != null) {
+        await _updateQuestionPairWithPdf(cachedPdfPath);
+      }
+
+      print('Using cached PDF from local database: $cachedPdfPath');
+      return;
+    }
+
+    // Check background conversion service cache
+    final bgCachedPath =
+        _conversionService.getCachedConversion(widget.filePath);
+    if (bgCachedPath != null && File(bgCachedPath).existsSync()) {
+      setState(() {
+        pdfPath = bgCachedPath;
+        isLoading = false;
+      });
+
+      // Cache it in local database for persistence
+      await _localDb.cachePdfConversion(widget.filePath, bgCachedPath);
+
+      // Update question pair with PDF path if needed
+      if (widget.questionPairId != null) {
+        await _updateQuestionPairWithPdf(bgCachedPath);
+      }
+
+      print('Using background service cached PDF: $bgCachedPath');
       return;
     }
 
     // Check if currently being converted
     if (_conversionService.isConverting(widget.filePath)) {
-      // Wait for background conversion to complete
       _waitForBackgroundConversion();
       return;
     }
 
     // Check if it's in queue
     if (_conversionService.isInQueue(widget.filePath)) {
-      // Promote to immediate priority and wait
       _promoteAndWait();
       return;
     }
@@ -70,16 +98,37 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
     await _convertImmediately();
   }
 
+  Future<void> _updateQuestionPairWithPdf(String pdfPath) async {
+    try {
+      if (widget.questionPairId == null) return;
+
+      // Determine if this is question or answer based on file path
+      final fileName = widget.filePath.toLowerCase();
+      final isQuestion =
+          fileName.contains('question') || fileName.contains('q_');
+
+      if (isQuestion) {
+        await _localDb.updateQuestionPairPdfPaths(
+            widget.questionPairId!, pdfPath, null);
+      } else {
+        await _localDb.updateQuestionPairPdfPaths(
+            widget.questionPairId!, null, pdfPath);
+      }
+
+      print(
+          'Updated question pair ${widget.questionPairId} with PDF path: $pdfPath');
+    } catch (e) {
+      print('Error updating question pair with PDF path: $e');
+    }
+  }
+
   void _waitForBackgroundConversion() {
     setState(() {
       isLoading = true;
     });
 
-    // Add completion listener
     _conversionService.addCompletionListener(
         widget.filePath, _onConversionComplete);
-
-    // Add progress listener for better UX
     _conversionService.addProgressListener(
         widget.filePath, _onConversionProgress);
   }
@@ -89,8 +138,6 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
       isLoading = true;
     });
 
-    // This would be called by the parent when user switches questions
-    // For now, just wait for conversion
     _conversionService.addCompletionListener(
         widget.filePath, _onConversionComplete);
     _conversionService.addProgressListener(
@@ -108,10 +155,20 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
 
       if (mounted) {
         if (convertedPath != null && File(convertedPath).existsSync()) {
+          // Cache the conversion in local database
+          await _localDb.cachePdfConversion(widget.filePath, convertedPath);
+
+          // Update question pair with PDF path if needed
+          if (widget.questionPairId != null) {
+            await _updateQuestionPairWithPdf(convertedPath);
+          }
+
           setState(() {
             pdfPath = convertedPath;
             isLoading = false;
           });
+
+          print('Immediate conversion completed and cached: $convertedPath');
         } else {
           setState(() {
             errorMessage = 'Failed to convert document to PDF';
@@ -126,6 +183,7 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
           isLoading = false;
         });
       }
+      print('Immediate conversion failed: $e');
     }
   }
 
@@ -138,9 +196,18 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
           errorMessage = 'Failed to convert document to PDF';
         }
       });
+
+      // Cache the result in local database if successful
+      if (result != null) {
+        _localDb.cachePdfConversion(widget.filePath, result);
+
+        // Update question pair with PDF path if needed
+        if (widget.questionPairId != null) {
+          _updateQuestionPairWithPdf(result);
+        }
+      }
     }
 
-    // Remove listeners
     _conversionService.removeCompletionListener(
         widget.filePath, _onConversionComplete);
     _conversionService.removeProgressListener(
@@ -152,7 +219,6 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
 
     switch (progress) {
       case ConversionProgress.queued:
-        // Still in queue
         break;
       case ConversionProgress.started:
         setState(() {
@@ -161,7 +227,6 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
         });
         break;
       case ConversionProgress.completed:
-        // Will be handled by completion listener
         break;
       case ConversionProgress.failed:
         setState(() {
@@ -172,18 +237,39 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
     }
   }
 
+  Future<void> _refreshConversion() async {
+    try {
+      // Clear cache entries
+      await _clearCacheForFile(widget.filePath);
+
+      // Force new conversion
+      await _convertImmediately();
+    } catch (e) {
+      print('Error refreshing conversion: $e');
+      setState(() {
+        errorMessage = 'Failed to refresh conversion: $e';
+      });
+    }
+  }
+
+  Future<void> _clearCacheForFile(String filePath) async {
+    try {
+      // This would require additional methods in LocalDatabaseService
+      // For now, we'll just re-convert
+      print('Clearing cache for: $filePath');
+    } catch (e) {
+      print('Error clearing cache: $e');
+    }
+  }
+
   @override
   void dispose() {
-    // Remove listeners
     _conversionService.removeCompletionListener(
         widget.filePath, _onConversionComplete);
     _conversionService.removeProgressListener(
         widget.filePath, _onConversionProgress);
 
-    // Clean up the temporary PDF file when widget is disposed
-    if (pdfPath != null && pdfPath != widget.filePath) {
-      DocumentConverterService.cleanupTempPdfs([pdfPath!]);
-    }
+    // Note: We don't clean up the PDF file anymore since it's cached in local DB
     super.dispose();
   }
 
@@ -247,11 +333,17 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
                   tooltip: 'Zoom Out',
                 ),
                 IconButton(
-                  icon: const Icon(Icons.refresh),
-                  onPressed: _convertImmediately,
-                  tooltip: 'Refresh',
+                  icon: const Icon(Icons.cached),
+                  onPressed: _refreshConversion,
+                  tooltip: 'Refresh Conversion',
                 ),
               ],
+              if (!isLoading && pdfPath != null)
+                IconButton(
+                  icon: const Icon(Icons.info_outline),
+                  onPressed: () => _showCacheInfo(),
+                  tooltip: 'Cache Info',
+                ),
               IconButton(
                 icon: const Icon(Icons.open_in_new),
                 onPressed: _openInExternalApp,
@@ -269,6 +361,57 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
           ),
         ),
       ],
+    );
+  }
+
+  void _showCacheInfo() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.info, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('PDF Cache Information'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Original File:',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            Text(widget.filePath, style: TextStyle(fontSize: 12)),
+            const SizedBox(height: 8),
+            Text('PDF File:', style: TextStyle(fontWeight: FontWeight.bold)),
+            Text(pdfPath ?? 'Not available', style: TextStyle(fontSize: 12)),
+            const SizedBox(height: 8),
+            Text('Cache Status:',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            Text(
+              pdfPath != null ? 'Cached (will not re-convert)' : 'Not cached',
+              style: TextStyle(
+                fontSize: 12,
+                color: pdfPath != null ? Colors.green : Colors.orange,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+          if (pdfPath != null)
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _refreshConversion();
+              },
+              child: const Text('Force Re-convert'),
+            ),
+        ],
+      ),
     );
   }
 
@@ -318,13 +461,13 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
       return Row(
         children: [
           Icon(
-            Icons.check_circle,
+            Icons.cached,
             size: 12,
             color: Colors.green.shade600,
           ),
           const SizedBox(width: 4),
           Text(
-            'Ready',
+            'Cached',
             style: TextStyle(
               color: Colors.green.shade600,
               fontSize: 10,
@@ -379,7 +522,7 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
             const SizedBox(height: 8),
             Text(
               isInBackground
-                  ? 'Your document is being processed while you browse'
+                  ? 'PDF will be cached for future viewing'
                   : 'This may take a moment for large files',
               style: const TextStyle(
                 fontSize: 12,
@@ -468,7 +611,7 @@ class _PdfPreviewWidgetState extends State<PdfPreviewWidget> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                  'Document loaded: ${details.document.pages.count} pages'),
+                  'Document loaded: ${details.document.pages.count} pages (cached)'),
               duration: const Duration(seconds: 2),
             ),
           );

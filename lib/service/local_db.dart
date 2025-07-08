@@ -16,18 +16,15 @@ class LocalDatabaseService {
 
   Future<Database> get database async {
     if (_database != null && _database!.isOpen) return _database!;
-    // If no database is selected, use master database
     _database = await _initDatabase(_masterDbName);
     _currentDatabaseName = _masterDbName;
     return _database!;
   }
 
-  // Get current database info
   String? get currentDatabaseName => _currentDatabaseName;
   bool get hasDatabaseSelected => _currentDatabaseName != null;
 
   Future<Database> _initDatabase(String dbName) async {
-    // Initialize FFI for desktop platforms
     if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
       sqfliteFfiInit();
       databaseFactory = databaseFactoryFfi;
@@ -38,13 +35,14 @@ class LocalDatabaseService {
 
     return await openDatabase(
       fullDbPath,
-      version: 1,
+      version: 2, // Updated version for PDF support
       onCreate: _createTables,
+      onUpgrade: _onUpgrade,
     );
   }
 
   Future<void> _createTables(Database db, int version) async {
-    // Question pairs table
+    // Question pairs table with PDF support
     await db.execute('''
       CREATE TABLE question_pairs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,6 +53,13 @@ class LocalDatabaseService {
         answer_file_name TEXT NOT NULL,
         question_file_size INTEGER NOT NULL,
         answer_file_size INTEGER NOT NULL,
+        question_pdf_path TEXT,
+        answer_pdf_path TEXT,
+        question_pdf_name TEXT,
+        answer_pdf_name TEXT,
+        question_pdf_size INTEGER,
+        answer_pdf_size INTEGER,
+        pdf_converted_at TEXT,
         upload_count INTEGER DEFAULT 0,
         created_at TEXT NOT NULL,
         last_accessed TEXT NOT NULL
@@ -78,7 +83,7 @@ class LocalDatabaseService {
       )
     ''');
 
-    // Database info table (for storing metadata about this database)
+    // Database info table
     await db.execute('''
       CREATE TABLE database_info (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,10 +96,236 @@ class LocalDatabaseService {
       )
     ''');
 
+    // PDF conversion cache table
+    await db.execute('''
+      CREATE TABLE pdf_conversion_cache (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        original_file_path TEXT NOT NULL UNIQUE,
+        original_file_hash TEXT,
+        pdf_file_path TEXT NOT NULL,
+        pdf_file_size INTEGER,
+        conversion_date TEXT NOT NULL,
+        last_accessed TEXT NOT NULL,
+        is_valid INTEGER DEFAULT 1
+      )
+    ''');
+
     debugPrint('Database tables created successfully for: $db');
   }
 
-  // Master database operations for tracking all databases
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      // Add PDF support columns
+      try {
+        await db.execute(
+            'ALTER TABLE question_pairs ADD COLUMN question_pdf_path TEXT');
+        await db.execute(
+            'ALTER TABLE question_pairs ADD COLUMN answer_pdf_path TEXT');
+        await db.execute(
+            'ALTER TABLE question_pairs ADD COLUMN question_pdf_name TEXT');
+        await db.execute(
+            'ALTER TABLE question_pairs ADD COLUMN answer_pdf_name TEXT');
+        await db.execute(
+            'ALTER TABLE question_pairs ADD COLUMN question_pdf_size INTEGER');
+        await db.execute(
+            'ALTER TABLE question_pairs ADD COLUMN answer_pdf_size INTEGER');
+        await db.execute(
+            'ALTER TABLE question_pairs ADD COLUMN pdf_converted_at TEXT');
+
+        // Create PDF conversion cache table
+        await db.execute('''
+          CREATE TABLE pdf_conversion_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            original_file_path TEXT NOT NULL UNIQUE,
+            original_file_hash TEXT,
+            pdf_file_path TEXT NOT NULL,
+            pdf_file_size INTEGER,
+            conversion_date TEXT NOT NULL,
+            last_accessed TEXT NOT NULL,
+            is_valid INTEGER DEFAULT 1
+          )
+        ''');
+
+        debugPrint('Database upgraded to version 2 with PDF support');
+      } catch (e) {
+        debugPrint('Error during database upgrade: $e');
+      }
+    }
+  }
+
+  // PDF Conversion Cache Methods
+  Future<String?> getCachedPdfPath(String originalFilePath) async {
+    await ensureDatabaseConnection();
+    final db = await database;
+
+    try {
+      // Check if file exists and get its modification time
+      final originalFile = File(originalFilePath);
+      if (!originalFile.existsSync()) return null;
+
+      final originalStat = await originalFile.stat();
+      final originalHash =
+          '${originalStat.size}_${originalStat.modified.millisecondsSinceEpoch}';
+
+      final List<Map<String, dynamic>> maps = await db.query(
+        'pdf_conversion_cache',
+        where:
+            'original_file_path = ? AND original_file_hash = ? AND is_valid = 1',
+        whereArgs: [originalFilePath, originalHash],
+      );
+
+      if (maps.isNotEmpty) {
+        final cachedPdfPath = maps.first['pdf_file_path'] as String;
+
+        // Verify PDF file still exists
+        if (File(cachedPdfPath).existsSync()) {
+          // Update last accessed time
+          await db.update(
+            'pdf_conversion_cache',
+            {'last_accessed': DateTime.now().toIso8601String()},
+            where: 'id = ?',
+            whereArgs: [maps.first['id']],
+          );
+
+          debugPrint('Using cached PDF: $cachedPdfPath');
+          return cachedPdfPath;
+        } else {
+          // Mark cache entry as invalid
+          await db.update(
+            'pdf_conversion_cache',
+            {'is_valid': 0},
+            where: 'id = ?',
+            whereArgs: [maps.first['id']],
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('Error getting cached PDF path: $e');
+    }
+
+    return null;
+  }
+
+  Future<void> cachePdfConversion(
+      String originalFilePath, String pdfFilePath) async {
+    await ensureDatabaseConnection();
+    final db = await database;
+
+    try {
+      final originalFile = File(originalFilePath);
+      final pdfFile = File(pdfFilePath);
+
+      if (!originalFile.existsSync() || !pdfFile.existsSync()) return;
+
+      final originalStat = await originalFile.stat();
+      final pdfStat = await pdfFile.stat();
+      final originalHash =
+          '${originalStat.size}_${originalStat.modified.millisecondsSinceEpoch}';
+
+      await db.insert(
+        'pdf_conversion_cache',
+        {
+          'original_file_path': originalFilePath,
+          'original_file_hash': originalHash,
+          'pdf_file_path': pdfFilePath,
+          'pdf_file_size': pdfStat.size,
+          'conversion_date': DateTime.now().toIso8601String(),
+          'last_accessed': DateTime.now().toIso8601String(),
+          'is_valid': 1,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+      debugPrint('Cached PDF conversion: $originalFilePath -> $pdfFilePath');
+    } catch (e) {
+      debugPrint('Error caching PDF conversion: $e');
+    }
+  }
+
+  Future<void> updateQuestionPairPdfPaths(
+      int pairId, String? questionPdfPath, String? answerPdfPath) async {
+    await ensureDatabaseConnection();
+    final db = await database;
+
+    try {
+      final updateData = <String, dynamic>{
+        'pdf_converted_at': DateTime.now().toIso8601String(),
+      };
+
+      if (questionPdfPath != null) {
+        final pdfFile = File(questionPdfPath);
+        if (pdfFile.existsSync()) {
+          final pdfStat = await pdfFile.stat();
+          updateData['question_pdf_path'] = questionPdfPath;
+          updateData['question_pdf_name'] = path.basename(questionPdfPath);
+          updateData['question_pdf_size'] = pdfStat.size;
+        }
+      }
+
+      if (answerPdfPath != null) {
+        final pdfFile = File(answerPdfPath);
+        if (pdfFile.existsSync()) {
+          final pdfStat = await pdfFile.stat();
+          updateData['answer_pdf_path'] = answerPdfPath;
+          updateData['answer_pdf_name'] = path.basename(answerPdfPath);
+          updateData['answer_pdf_size'] = pdfStat.size;
+        }
+      }
+
+      await db.update(
+        'question_pairs',
+        updateData,
+        where: 'id = ?',
+        whereArgs: [pairId],
+      );
+
+      debugPrint('Updated question pair $pairId with PDF paths');
+    } catch (e) {
+      debugPrint('Error updating question pair PDF paths: $e');
+    }
+  }
+
+  // Clean up old PDF cache entries
+  Future<void> cleanupPdfCache() async {
+    await ensureDatabaseConnection();
+    final db = await database;
+
+    try {
+      final cutoffDate = DateTime.now().subtract(const Duration(days: 7));
+
+      // Get old cache entries
+      final List<Map<String, dynamic>> oldEntries = await db.query(
+        'pdf_conversion_cache',
+        where: 'last_accessed < ? OR is_valid = 0',
+        whereArgs: [cutoffDate.toIso8601String()],
+      );
+
+      // Delete PDF files and cache entries
+      for (final entry in oldEntries) {
+        try {
+          final pdfFile = File(entry['pdf_file_path'] as String);
+          if (pdfFile.existsSync()) {
+            await pdfFile.delete();
+          }
+        } catch (e) {
+          debugPrint('Error deleting cached PDF file: $e');
+        }
+      }
+
+      // Remove cache entries
+      await db.delete(
+        'pdf_conversion_cache',
+        where: 'last_accessed < ? OR is_valid = 0',
+        whereArgs: [cutoffDate.toIso8601String()],
+      );
+
+      debugPrint('Cleaned up old PDF cache entries');
+    } catch (e) {
+      debugPrint('Error cleaning up PDF cache: $e');
+    }
+  }
+
+  // Master database operations
   Future<Database> _getMasterDatabase() async {
     final dbPath = await getDatabasesPath();
     final masterDbPath = path.join(dbPath, 'question_bank_registry.db');
@@ -132,7 +363,6 @@ class LocalDatabaseService {
 
     List<DatabaseInfo> databases = [];
     for (final map in maps) {
-      // Get current stats for each database
       try {
         final db = await _initDatabase(map['database_name']);
         final questionCount = Sqflite.firstIntValue(
@@ -149,7 +379,6 @@ class LocalDatabaseService {
             ) ??
             0;
 
-        // Only close if it's not the currently selected database
         if (map['database_name'] != _currentDatabaseName) {
           await db.close();
         }
@@ -162,7 +391,6 @@ class LocalDatabaseService {
         }));
       } catch (e) {
         debugPrint('Error reading database ${map['database_name']}: $e');
-        // Add with zero counts if database is corrupted
         databases.add(DatabaseInfo.fromMap({
           ...map,
           'question_count': 0,
@@ -185,10 +413,8 @@ class LocalDatabaseService {
     final dbName =
         '${sanitizedName}_${DateTime.now().millisecondsSinceEpoch}.db';
 
-    // Create the new database
     final db = await _initDatabase(dbName);
 
-    // Add database info to the database itself
     await db.insert('database_info', {
       'database_name': dbName,
       'display_name': displayName,
@@ -200,7 +426,6 @@ class LocalDatabaseService {
 
     await db.close();
 
-    // Register in master database
     final masterDb = await _getMasterDatabase();
     await masterDb.insert('databases', {
       'database_name': dbName,
@@ -226,7 +451,6 @@ class LocalDatabaseService {
     _database = await _initDatabase(databaseName);
     _currentDatabaseName = databaseName;
 
-    // Update last accessed time in master database
     final masterDb = await _getMasterDatabase();
     await masterDb.update(
       'databases',
@@ -240,7 +464,6 @@ class LocalDatabaseService {
   }
 
   Future<void> deleteDatabase(String databaseName) async {
-    // Close current database if it's the one being deleted
     if (_currentDatabaseName == databaseName &&
         _database != null &&
         _database!.isOpen) {
@@ -249,7 +472,6 @@ class LocalDatabaseService {
       _currentDatabaseName = null;
     }
 
-    // Delete the database file
     final dbPath = await getDatabasesPath();
     final fullDbPath = path.join(dbPath, databaseName);
     final file = File(fullDbPath);
@@ -257,7 +479,6 @@ class LocalDatabaseService {
       await file.delete();
     }
 
-    // Remove from master database
     final masterDb = await _getMasterDatabase();
     await masterDb.delete(
       'databases',
@@ -318,7 +539,6 @@ class LocalDatabaseService {
         .substring(0, name.length > 20 ? 20 : name.length);
   }
 
-  // Ensure database is connected and ready
   Future<void> ensureDatabaseConnection() async {
     if (_database == null || !_database!.isOpen) {
       if (_currentDatabaseName != null) {
@@ -346,7 +566,6 @@ class LocalDatabaseService {
 
     await batch.commit();
 
-    // Update stats in master database
     if (_currentDatabaseName != null) {
       await updateDatabaseStats(_currentDatabaseName!);
     }
@@ -386,7 +605,6 @@ class LocalDatabaseService {
       [pairId],
     );
 
-    // Update stats in master database
     if (_currentDatabaseName != null) {
       await updateDatabaseStats(_currentDatabaseName!);
     }
@@ -400,7 +618,6 @@ class LocalDatabaseService {
       await ensureDatabaseConnection();
       final db = await database;
 
-      // Validate the item before inserting
       if (item.questionPairId <= 0) {
         throw Exception('Invalid question pair ID: ${item.questionPairId}');
       }
@@ -408,7 +625,6 @@ class LocalDatabaseService {
       final result = await db.insert('upload_queue', item.toMap());
       debugPrint('Successfully added to upload queue with ID: $result');
 
-      // Update stats in master database
       if (_currentDatabaseName != null) {
         await updateDatabaseStats(_currentDatabaseName!);
       }
@@ -443,7 +659,6 @@ class LocalDatabaseService {
       whereArgs: [queueId],
     );
 
-    // Update stats in master database
     if (_currentDatabaseName != null) {
       await updateDatabaseStats(_currentDatabaseName!);
     }
@@ -456,7 +671,6 @@ class LocalDatabaseService {
     final db = await database;
     await db.delete('upload_queue');
 
-    // Update stats in master database
     if (_currentDatabaseName != null) {
       await updateDatabaseStats(_currentDatabaseName!);
     }
@@ -473,7 +687,6 @@ class LocalDatabaseService {
     return count ?? 0;
   }
 
-  // Get question pair with upload queue data
   Future<List<QuestionPairWithQueue>> getQuestionPairsWithQueue() async {
     await ensureDatabaseConnection();
     final db = await database;
@@ -514,7 +727,6 @@ class LocalDatabaseService {
     return pairsMap.values.toList();
   }
 
-  // Cleanup old records
   Future<void> cleanupOldRecords() async {
     await ensureDatabaseConnection();
     final db = await database;
@@ -526,7 +738,10 @@ class LocalDatabaseService {
       whereArgs: [cutoffDate.toIso8601String()],
     );
 
-    debugPrint('Cleaned up old unused question pairs');
+    // Also cleanup PDF cache
+    await cleanupPdfCache();
+
+    debugPrint('Cleaned up old unused question pairs and PDF cache');
   }
 }
 
@@ -589,7 +804,7 @@ class DatabaseInfo {
   }
 }
 
-// Existing models remain the same
+// Updated LocalQuestionPair with PDF support
 class LocalQuestionPair {
   final int? id;
   final String baseName;
@@ -599,6 +814,13 @@ class LocalQuestionPair {
   final String answerFileName;
   final int questionFileSize;
   final int answerFileSize;
+  final String? questionPdfPath;
+  final String? answerPdfPath;
+  final String? questionPdfName;
+  final String? answerPdfName;
+  final int? questionPdfSize;
+  final int? answerPdfSize;
+  final DateTime? pdfConvertedAt;
   final int uploadCount;
   final DateTime createdAt;
   final DateTime lastAccessed;
@@ -612,6 +834,13 @@ class LocalQuestionPair {
     required this.answerFileName,
     required this.questionFileSize,
     required this.answerFileSize,
+    this.questionPdfPath,
+    this.answerPdfPath,
+    this.questionPdfName,
+    this.answerPdfName,
+    this.questionPdfSize,
+    this.answerPdfSize,
+    this.pdfConvertedAt,
     this.uploadCount = 0,
     required this.createdAt,
     required this.lastAccessed,
@@ -627,6 +856,13 @@ class LocalQuestionPair {
       'answer_file_name': answerFileName,
       'question_file_size': questionFileSize,
       'answer_file_size': answerFileSize,
+      'question_pdf_path': questionPdfPath,
+      'answer_pdf_path': answerPdfPath,
+      'question_pdf_name': questionPdfName,
+      'answer_pdf_name': answerPdfName,
+      'question_pdf_size': questionPdfSize,
+      'answer_pdf_size': answerPdfSize,
+      'pdf_converted_at': pdfConvertedAt?.toIso8601String(),
       'upload_count': uploadCount,
       'created_at': createdAt.toIso8601String(),
       'last_accessed': lastAccessed.toIso8601String(),
@@ -643,6 +879,15 @@ class LocalQuestionPair {
       answerFileName: map['answer_file_name']?.toString() ?? '',
       questionFileSize: map['question_file_size']?.toInt() ?? 0,
       answerFileSize: map['answer_file_size']?.toInt() ?? 0,
+      questionPdfPath: map['question_pdf_path']?.toString(),
+      answerPdfPath: map['answer_pdf_path']?.toString(),
+      questionPdfName: map['question_pdf_name']?.toString(),
+      answerPdfName: map['answer_pdf_name']?.toString(),
+      questionPdfSize: map['question_pdf_size']?.toInt(),
+      answerPdfSize: map['answer_pdf_size']?.toInt(),
+      pdfConvertedAt: map['pdf_converted_at'] != null
+          ? DateTime.parse(map['pdf_converted_at'])
+          : null,
       uploadCount: map['upload_count']?.toInt() ?? 0,
       createdAt:
           DateTime.parse(map['created_at'] ?? DateTime.now().toIso8601String()),
@@ -650,6 +895,8 @@ class LocalQuestionPair {
           map['last_accessed'] ?? DateTime.now().toIso8601String()),
     );
   }
+
+  bool get hasPdfFiles => questionPdfPath != null && answerPdfPath != null;
 }
 
 class UploadQueueItem {

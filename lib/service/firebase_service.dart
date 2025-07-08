@@ -5,14 +5,41 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;
 import 'package:question_bank/question_model.dart';
+import 'package:question_bank/service/doc_converter.dart';
+import 'package:question_bank/service/local_db.dart';
 
 class FirebaseService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseStorage _storage = FirebaseStorage.instance;
+  final LocalDatabaseService _localDb = LocalDatabaseService();
+
+  /// Get the correct MIME type for a file based on its extension
+  String _getMimeType(String filePath) {
+    final extension = path.extension(filePath).toLowerCase();
+    switch (extension) {
+      case '.pdf':
+        return 'application/pdf';
+      case '.doc':
+        return 'application/msword';
+      case '.docx':
+        return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      case '.txt':
+        return 'text/plain';
+      case '.gnm':
+        return 'application/x-gnumeric';
+      case '.jpg':
+      case '.jpeg':
+        return 'image/jpeg';
+      case '.png':
+        return 'image/png';
+      default:
+        return 'application/octet-stream';
+    }
+  }
 
   Future<void> uploadQuestion(QuestionModel question) async {
     try {
-      print('Starting upload for question...');
+      print('Starting upload for question with PDF support...');
 
       // Validate input files exist
       if (question.questionFilePath == null ||
@@ -51,43 +78,156 @@ class FirebaseService {
 
       print('Generated question ID: ${question.questionId}');
 
-      // Upload question file
+      // Convert files to PDF if needed and cache them
+      String? questionPdfPath;
+      String? answerPdfPath;
+
+      try {
+        // Check for cached PDF first
+        questionPdfPath =
+            await _localDb.getCachedPdfPath(question.questionFilePath!);
+        if (questionPdfPath == null) {
+          // Convert and cache
+          questionPdfPath = await DocumentConverterService.convertToPdf(
+              question.questionFilePath!);
+          if (questionPdfPath != null) {
+            await _localDb.cachePdfConversion(
+                question.questionFilePath!, questionPdfPath);
+          }
+        }
+
+        // Same for answer file
+        answerPdfPath =
+            await _localDb.getCachedPdfPath(question.answerFilePath!);
+        if (answerPdfPath == null) {
+          answerPdfPath = await DocumentConverterService.convertToPdf(
+              question.answerFilePath!);
+          if (answerPdfPath != null) {
+            await _localDb.cachePdfConversion(
+                question.answerFilePath!, answerPdfPath);
+          }
+        }
+
+        print(
+            'PDF conversion completed - Question: ${questionPdfPath != null}, Answer: ${answerPdfPath != null}');
+      } catch (e) {
+        print('PDF conversion failed: $e');
+        // Continue without PDFs
+      }
+
+      // Upload original question file with correct MIME type
       String questionFileName =
           '${question.questionId}_question${path.extension(question.questionFilePath!)}';
       final questionRef = _storage
           .ref()
-          .child('questions/${question.stream}/$questionFileName');
+          .child('questions/original/${question.stream}/$questionFileName');
 
-      print('Uploading question file: $questionFileName');
+      print('Uploading original question file: $questionFileName');
 
       try {
-        final questionUploadTask = questionRef.putFile(questionFile);
+        final questionMimeType = _getMimeType(question.questionFilePath!);
+        print('Question file MIME type: $questionMimeType');
+
+        final questionUploadTask = questionRef.putFile(
+          questionFile,
+          SettableMetadata(contentType: questionMimeType),
+        );
         final questionTaskSnapshot = await questionUploadTask;
         question.questionFileUrl =
             await questionTaskSnapshot.ref.getDownloadURL();
         print(
-            'Question file uploaded successfully: ${question.questionFileUrl}');
+            'Original question file uploaded successfully: ${question.questionFileUrl}');
       } catch (e) {
-        print('Error uploading question file: $e');
-        throw Exception('Failed to upload question file: $e');
+        print('Error uploading original question file: $e');
+        throw Exception('Failed to upload original question file: $e');
       }
 
-      // Upload answer file
+      // Upload original answer file with correct MIME type
       String answerFileName =
           '${question.questionId}_answer${path.extension(question.answerFilePath!)}';
-      final answerRef =
-          _storage.ref().child('answers/${question.stream}/$answerFileName');
+      final answerRef = _storage
+          .ref()
+          .child('answers/original/${question.stream}/$answerFileName');
 
-      print('Uploading answer file: $answerFileName');
+      print('Uploading original answer file: $answerFileName');
 
       try {
-        final answerUploadTask = answerRef.putFile(answerFile);
+        final answerMimeType = _getMimeType(question.answerFilePath!);
+        print('Answer file MIME type: $answerMimeType');
+
+        final answerUploadTask = answerRef.putFile(
+          answerFile,
+          SettableMetadata(contentType: answerMimeType),
+        );
         final answerTaskSnapshot = await answerUploadTask;
         question.answerFileUrl = await answerTaskSnapshot.ref.getDownloadURL();
-        print('Answer file uploaded successfully: ${question.answerFileUrl}');
+        print(
+            'Original answer file uploaded successfully: ${question.answerFileUrl}');
       } catch (e) {
-        print('Error uploading answer file: $e');
-        throw Exception('Failed to upload answer file: $e');
+        print('Error uploading original answer file: $e');
+        throw Exception('Failed to upload original answer file: $e');
+      }
+
+      // Upload PDF files if available
+      if (questionPdfPath != null && File(questionPdfPath).existsSync()) {
+        try {
+          String questionPdfFileName = '${question.questionId}_question.pdf';
+          final questionPdfRef = _storage
+              .ref()
+              .child('questions/pdf/${question.stream}/$questionPdfFileName');
+
+          print('Uploading question PDF: $questionPdfFileName');
+
+          // Set correct MIME type for PDF
+          final questionPdfUploadTask = questionPdfRef.putFile(
+            File(questionPdfPath),
+            SettableMetadata(contentType: 'application/pdf'),
+          );
+          final questionPdfTaskSnapshot = await questionPdfUploadTask;
+          question.questionPdfUrl =
+              await questionPdfTaskSnapshot.ref.getDownloadURL();
+
+          // Set PDF metadata
+          question.questionPdfPath = questionPdfPath;
+          question.questionPdfFileName = questionPdfFileName;
+          question.questionPdfSize = await File(questionPdfPath).length();
+
+          print(
+              'Question PDF uploaded successfully: ${question.questionPdfUrl}');
+        } catch (e) {
+          print('Error uploading question PDF: $e');
+          // Continue without PDF
+        }
+      }
+
+      if (answerPdfPath != null && File(answerPdfPath).existsSync()) {
+        try {
+          String answerPdfFileName = '${question.questionId}_answer.pdf';
+          final answerPdfRef = _storage
+              .ref()
+              .child('answers/pdf/${question.stream}/$answerPdfFileName');
+
+          print('Uploading answer PDF: $answerPdfFileName');
+
+          // Set correct MIME type for PDF
+          final answerPdfUploadTask = answerPdfRef.putFile(
+            File(answerPdfPath),
+            SettableMetadata(contentType: 'application/pdf'),
+          );
+          final answerPdfTaskSnapshot = await answerPdfUploadTask;
+          question.answerPdfUrl =
+              await answerPdfTaskSnapshot.ref.getDownloadURL();
+
+          // Set PDF metadata
+          question.answerPdfPath = answerPdfPath;
+          question.answerPdfFileName = answerPdfFileName;
+          question.answerPdfSize = await File(answerPdfPath).length();
+
+          print('Answer PDF uploaded successfully: ${question.answerPdfUrl}');
+        } catch (e) {
+          print('Error uploading answer PDF: $e');
+          // Continue without PDF
+        }
       }
 
       // Set upload timestamp and file information
@@ -109,27 +249,33 @@ class FirebaseService {
         try {
           await questionRef.delete();
           await answerRef.delete();
+          if (question.questionPdfUrl != null) {
+            await _storage.refFromURL(question.questionPdfUrl!).delete();
+          }
+          if (question.answerPdfUrl != null) {
+            await _storage.refFromURL(question.answerPdfUrl!).delete();
+          }
         } catch (cleanupError) {
           print('Error during cleanup: $cleanupError');
         }
         throw Exception('Failed to save to Firestore: $e');
       }
 
-      print('Question upload completed successfully');
+      print('Question upload completed successfully with PDF support');
     } catch (e) {
       print('Failed to upload question: $e');
       debugPrint('Failed to upload question: $e');
-      rethrow; // Re-throw to let caller handle the error
+      rethrow;
     }
   }
 
-  // Upload with progress callback (thread-safe version)
+  // Upload with progress callback (enhanced with PDF support)
   Future<void> uploadQuestionWithProgress(
     QuestionModel question,
     Function(double)? onProgress,
   ) async {
     try {
-      print('Starting upload with progress tracking...');
+      print('Starting upload with progress tracking and PDF support...');
 
       // Validate input files exist
       if (question.questionFilePath == null ||
@@ -159,29 +305,50 @@ class FirebaseService {
       question.questionId = docRef.id;
 
       double totalProgress = 0.0;
+      final totalFiles = 2; // Original files
+      int currentFileIndex = 0;
 
-      // Upload question file
+      // Update progress helper
+      void updateProgress(double fileProgress) {
+        final overallProgress = (currentFileIndex + fileProgress) / totalFiles;
+        if (onProgress != null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            onProgress(overallProgress *
+                0.8); // Reserve 20% for PDF conversion and Firestore save
+          });
+        }
+      }
+
+      // Convert to PDF in background while uploading originals
+      String? questionPdfPath;
+      String? answerPdfPath;
+
+      // Start PDF conversion asynchronously
+      final pdfConversionFuture = Future.wait([
+        _convertAndCachePdf(question.questionFilePath!),
+        _convertAndCachePdf(question.answerFilePath!),
+      ]);
+
+      // Upload original question file with correct MIME type
       String questionFileName =
           '${question.questionId}_question${path.extension(question.questionFilePath!)}';
       final questionRef = _storage
           .ref()
-          .child('questions/${question.stream}/$questionFileName');
+          .child('questions/original/${question.stream}/$questionFileName');
 
-      final questionUploadTask = questionRef.putFile(questionFile);
+      final questionMimeType = _getMimeType(question.questionFilePath!);
+      print('Question file MIME type: $questionMimeType');
 
-      // Listen to progress with proper thread handling
+      final questionUploadTask = questionRef.putFile(
+        questionFile,
+        SettableMetadata(contentType: questionMimeType),
+      );
+
       questionUploadTask.snapshotEvents.listen(
         (TaskSnapshot snapshot) {
           if (snapshot.totalBytes > 0) {
             final progress = snapshot.bytesTransferred / snapshot.totalBytes;
-            totalProgress = progress * 0.5; // Question file is 50% of total
-
-            // Ensure callback runs on main thread
-            if (onProgress != null) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                onProgress(totalProgress);
-              });
-            }
+            updateProgress(progress);
           }
         },
         onError: (error) {
@@ -192,29 +359,28 @@ class FirebaseService {
       final questionTaskSnapshot = await questionUploadTask;
       question.questionFileUrl =
           await questionTaskSnapshot.ref.getDownloadURL();
+      currentFileIndex++;
 
-      // Upload answer file
+      // Upload original answer file with correct MIME type
       String answerFileName =
           '${question.questionId}_answer${path.extension(question.answerFilePath!)}';
-      final answerRef =
-          _storage.ref().child('answers/${question.stream}/$answerFileName');
+      final answerRef = _storage
+          .ref()
+          .child('answers/original/${question.stream}/$answerFileName');
 
-      final answerUploadTask = answerRef.putFile(answerFile);
+      final answerMimeType = _getMimeType(question.answerFilePath!);
+      print('Answer file MIME type: $answerMimeType');
 
-      // Listen to progress with proper thread handling
+      final answerUploadTask = answerRef.putFile(
+        answerFile,
+        SettableMetadata(contentType: answerMimeType),
+      );
+
       answerUploadTask.snapshotEvents.listen(
         (TaskSnapshot snapshot) {
           if (snapshot.totalBytes > 0) {
             final progress = snapshot.bytesTransferred / snapshot.totalBytes;
-            totalProgress =
-                0.5 + (progress * 0.5); // Answer file is remaining 50%
-
-            // Ensure callback runs on main thread
-            if (onProgress != null) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                onProgress(totalProgress);
-              });
-            }
+            updateProgress(progress);
           }
         },
         onError: (error) {
@@ -224,6 +390,49 @@ class FirebaseService {
 
       final answerTaskSnapshot = await answerUploadTask;
       question.answerFileUrl = await answerTaskSnapshot.ref.getDownloadURL();
+
+      // Update progress to 80%
+      if (onProgress != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          onProgress(0.8);
+        });
+      }
+
+      // Wait for PDF conversion to complete
+      try {
+        final pdfResults = await pdfConversionFuture;
+        questionPdfPath = pdfResults[0];
+        answerPdfPath = pdfResults[1];
+
+        // Upload PDFs if available
+        if (questionPdfPath != null && File(questionPdfPath).existsSync()) {
+          await _uploadPdfFile(
+            File(questionPdfPath),
+            'questions/pdf/${question.stream}/${question.questionId}_question.pdf',
+            question,
+            true, // isQuestion
+          );
+        }
+
+        if (answerPdfPath != null && File(answerPdfPath).existsSync()) {
+          await _uploadPdfFile(
+            File(answerPdfPath),
+            'answers/pdf/${question.stream}/${question.questionId}_answer.pdf',
+            question,
+            false, // isAnswer
+          );
+        }
+      } catch (e) {
+        print('PDF conversion/upload failed: $e');
+        // Continue without PDFs
+      }
+
+      // Update progress to 90%
+      if (onProgress != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          onProgress(0.9);
+        });
+      }
 
       // Set upload timestamp and file information
       question.uploadedAt = DateTime.now();
@@ -244,10 +453,62 @@ class FirebaseService {
         });
       }
 
-      print('Question upload with progress completed successfully');
+      print(
+          'Question upload with progress and PDF support completed successfully');
     } catch (e) {
       debugPrint('Failed to upload question with progress: $e');
       rethrow;
+    }
+  }
+
+  Future<String?> _convertAndCachePdf(String originalFilePath) async {
+    try {
+      // Check for cached PDF first
+      String? pdfPath = await _localDb.getCachedPdfPath(originalFilePath);
+      if (pdfPath != null) {
+        return pdfPath;
+      }
+
+      // Convert and cache
+      pdfPath = await DocumentConverterService.convertToPdf(originalFilePath);
+      if (pdfPath != null) {
+        await _localDb.cachePdfConversion(originalFilePath, pdfPath);
+      }
+      return pdfPath;
+    } catch (e) {
+      debugPrint('PDF conversion failed for $originalFilePath: $e');
+      return null;
+    }
+  }
+
+  Future<void> _uploadPdfFile(File pdfFile, String storagePath,
+      QuestionModel question, bool isQuestion) async {
+    try {
+      final pdfRef = _storage.ref().child(storagePath);
+      // Always set PDF MIME type explicitly
+      final pdfUploadTask = pdfRef.putFile(
+        pdfFile,
+        SettableMetadata(contentType: 'application/pdf'),
+      );
+      final pdfTaskSnapshot = await pdfUploadTask;
+      final downloadUrl = await pdfTaskSnapshot.ref.getDownloadURL();
+
+      if (isQuestion) {
+        question.questionPdfUrl = downloadUrl;
+        question.questionPdfPath = pdfFile.path;
+        question.questionPdfFileName = path.basename(storagePath);
+        question.questionPdfSize = await pdfFile.length();
+      } else {
+        question.answerPdfUrl = downloadUrl;
+        question.answerPdfPath = pdfFile.path;
+        question.answerPdfFileName = path.basename(storagePath);
+        question.answerPdfSize = await pdfFile.length();
+      }
+
+      print('PDF uploaded with correct MIME type: application/pdf');
+    } catch (e) {
+      debugPrint('Failed to upload PDF file: $e');
+      throw e;
     }
   }
 
@@ -255,12 +516,10 @@ class FirebaseService {
     try {
       List<QuestionModel> allQuestions = [];
 
-      // Get all streams
       final streamsSnapshot = await _firestore.collection('data').get();
 
       for (var streamDoc in streamsSnapshot.docs) {
         try {
-          // Get questions for each stream
           final questionsSnapshot =
               await streamDoc.reference.collection('questions').get();
 
@@ -278,7 +537,6 @@ class FirebaseService {
         }
       }
 
-      // Sort by upload date
       allQuestions.sort((a, b) =>
           b.uploadedAt?.compareTo(a.uploadedAt ?? DateTime.now()) ?? 0);
 
@@ -320,15 +578,14 @@ class FirebaseService {
         if (questionDoc.exists) {
           final questionData = questionDoc.data()!;
 
-          // Delete files from storage with proper error handling
+          // Delete original files from storage
           if (questionData['questionFileUrl'] != null) {
             try {
               final questionFileRef =
                   _storage.refFromURL(questionData['questionFileUrl']);
               await questionFileRef.delete();
             } catch (e) {
-              debugPrint('Error deleting question file: $e');
-              // Continue with deletion even if file deletion fails
+              debugPrint('Error deleting original question file: $e');
             }
           }
 
@@ -338,8 +595,28 @@ class FirebaseService {
                   _storage.refFromURL(questionData['answerFileUrl']);
               await answerFileRef.delete();
             } catch (e) {
-              debugPrint('Error deleting answer file: $e');
-              // Continue with deletion even if file deletion fails
+              debugPrint('Error deleting original answer file: $e');
+            }
+          }
+
+          // Delete PDF files from storage
+          if (questionData['questionPdfUrl'] != null) {
+            try {
+              final questionPdfRef =
+                  _storage.refFromURL(questionData['questionPdfUrl']);
+              await questionPdfRef.delete();
+            } catch (e) {
+              debugPrint('Error deleting question PDF file: $e');
+            }
+          }
+
+          if (questionData['answerPdfUrl'] != null) {
+            try {
+              final answerPdfRef =
+                  _storage.refFromURL(questionData['answerPdfUrl']);
+              await answerPdfRef.delete();
+            } catch (e) {
+              debugPrint('Error deleting answer PDF file: $e');
             }
           }
 
@@ -368,7 +645,6 @@ class FirebaseService {
       List<QuestionModel> filteredQuestions = [];
 
       if (stream != null) {
-        // If stream is specified, search only in that stream
         final questionsSnapshot = await _firestore
             .collection('data')
             .doc(stream)
@@ -385,7 +661,6 @@ class FirebaseService {
           }
         }
       } else {
-        // If no stream specified, search all streams
         final allQuestions = await getAllQuestions();
 
         for (var question in allQuestions) {
@@ -515,6 +790,55 @@ class FirebaseService {
     } catch (e) {
       debugPrint('Error checking question existence: $e');
       return false;
+    }
+  }
+
+  // Get storage usage statistics
+  Future<Map<String, dynamic>> getStorageStats() async {
+    try {
+      final stats = <String, dynamic>{
+        'totalQuestions': 0,
+        'questionsWithPdf': 0,
+        'originalFilesSize': 0,
+        'pdfFilesSize': 0,
+        'totalSize': 0,
+      };
+
+      final allQuestions = await getAllQuestions();
+      stats['totalQuestions'] = allQuestions.length;
+
+      int questionsWithPdf = 0;
+      int originalSize = 0;
+      int pdfSize = 0;
+
+      for (final question in allQuestions) {
+        // Count original file sizes
+        originalSize +=
+            (question.questionFileSize ?? 0) + (question.answerFileSize ?? 0);
+
+        // Count PDF file sizes
+        if (question.questionPdfSize != null &&
+            question.answerPdfSize != null) {
+          questionsWithPdf++;
+          pdfSize += question.questionPdfSize! + question.answerPdfSize!;
+        }
+      }
+
+      stats['questionsWithPdf'] = questionsWithPdf;
+      stats['originalFilesSize'] = originalSize;
+      stats['pdfFilesSize'] = pdfSize;
+      stats['totalSize'] = originalSize + pdfSize;
+
+      return stats;
+    } catch (e) {
+      debugPrint('Failed to get storage stats: $e');
+      return {
+        'totalQuestions': 0,
+        'questionsWithPdf': 0,
+        'originalFilesSize': 0,
+        'pdfFilesSize': 0,
+        'totalSize': 0,
+      };
     }
   }
 }

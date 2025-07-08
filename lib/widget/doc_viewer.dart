@@ -7,11 +7,13 @@ import 'dart:io';
 class DocumentViewer extends StatefulWidget {
   final String questionFilePath;
   final String answerFilePath;
+  final int? questionPairId; // Add question pair ID for caching
 
   const DocumentViewer({
     Key? key,
     required this.questionFilePath,
     required this.answerFilePath,
+    this.questionPairId,
   }) : super(key: key);
 
   @override
@@ -138,13 +140,15 @@ class _DocumentViewerState extends State<DocumentViewer> {
           ),
         ),
 
-        // PDF Preview Content
+        // PDF Preview Content with question pair ID
         Expanded(
           child: PdfPreviewWidget(
             key:
                 ValueKey(currentFilePath), // Force rebuild when switching files
             filePath: currentFilePath,
             title: currentFileName,
+            questionPairId:
+                widget.questionPairId, // Pass question pair ID for caching
           ),
         ),
       ],
