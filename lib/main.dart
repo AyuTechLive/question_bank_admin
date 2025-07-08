@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:question_bank/admin_dashboard.dart';
+
+import 'package:question_bank/service/local_db.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'firebase_options.dart';
@@ -12,23 +14,30 @@ void main() async {
   await windowManager.ensureInitialized();
 
   WindowOptions windowOptions = const WindowOptions(
-    size: Size(1200, 800),
+    //  size: Size(1400, 900), // Increased size for better layout
     center: true,
     backgroundColor: Colors.transparent,
-    skipTaskbar: false,
     titleBarStyle: TitleBarStyle.normal,
     title: 'Question Bank Admin Dashboard',
+    minimumSize: Size(1200, 800),
   );
-
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
-    await windowManager.show();
-    await windowManager.focus();
-  });
 
   // Initialize Firebase
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  // Initialize Local Database
+  try {
+    final localDb = LocalDatabaseService();
+    await localDb.database; // This initializes the database
+    debugPrint('Local database initialized successfully');
+
+    // Cleanup old records on startup
+    await localDb.cleanupOldRecords();
+  } catch (e) {
+    debugPrint('Error initializing local database: $e');
+  }
 
   runApp(const AdminApp());
 }
@@ -43,6 +52,27 @@ class AdminApp extends StatelessWidget {
       theme: ThemeData(
         primarySwatch: Colors.blue,
         useMaterial3: true,
+        // Enhanced theme for better UI
+        cardTheme: CardTheme(
+          elevation: 2,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+          ),
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+          ),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        ),
       ),
       debugShowCheckedModeBanner: false,
       home: const AdminDashboard(),

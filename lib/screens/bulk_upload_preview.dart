@@ -1,13 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:question_bank/model/question_metadata_model.dart';
-
 import 'package:question_bank/question_model.dart';
 import 'package:question_bank/service/background_conversion.dart';
 import 'package:question_bank/service/firebase_service.dart';
 import 'package:question_bank/service/metadata_service.dart';
-
 import 'package:question_bank/widget/doc_viewer.dart';
-
 import 'package:question_bank/widget/question_metadata_form.dart';
 
 class BulkUploadPreviewScreen extends StatefulWidget {
@@ -32,6 +29,7 @@ class _BulkUploadPreviewScreenState extends State<BulkUploadPreviewScreen> {
   int selectedQuestionIndex = 0;
   bool isUploading = false;
   double uploadProgress = 0.0;
+  String uploadStatus = '';
 
   @override
   void initState() {
@@ -80,26 +78,35 @@ class _BulkUploadPreviewScreenState extends State<BulkUploadPreviewScreen> {
     setState(() {
       isUploading = true;
       uploadProgress = 0.0;
+      uploadStatus = 'Starting upload...';
     });
 
+    int uploadedCount = 0;
+    int duplicateCount = 0;
+    int errorCount = 0;
+    List<String> errorMessages = [];
+
     try {
-      // Upload files (skip duplicates silently)
-      int uploadedCount = 0;
       for (int i = 0; i < widget.questionModels.length; i++) {
         final model = widget.questionModels[i];
 
-        // Check if question with same metadata already exists
-        final isDuplicate = await _firebaseService.questionExistsWithMetadata(
-          stream: model.stream!,
-          level: model.level!,
-          topic: model.topic!,
-          subtopic: model.subtopic!,
-          language: model.language!,
-          chapter: model.chapter!,
-          type: model.type!,
-        );
+        setState(() {
+          uploadStatus =
+              'Processing ${model.baseName} (${i + 1}/${widget.questionModels.length})';
+          uploadProgress = (i + 1) / widget.questionModels.length;
+        });
 
-        if (!isDuplicate) {
+        try {
+          // Check if question with same metadata and files already exists
+          setState(() {
+            uploadStatus = 'Checking for duplicates: ${model.baseName}';
+          });
+
+          setState(() {
+            uploadStatus = 'Uploading files for: ${model.baseName}';
+          });
+
+          // Create question model
           final question = QuestionModel(
             stream: model.stream!,
             level: model.level!,
@@ -112,32 +119,115 @@ class _BulkUploadPreviewScreenState extends State<BulkUploadPreviewScreen> {
             answerFilePath: model.answerFile.path,
           );
 
+          print('Uploading question: ${model.baseName}');
+          print('Question file path: ${question.questionFilePath}');
+          print('Answer file path: ${question.answerFilePath}');
+
+          // Upload the question
           await _firebaseService.uploadQuestion(question);
           uploadedCount++;
-        }
-        // If duplicate, silently skip without any notification
 
-        setState(() {
-          uploadProgress = (i + 1) / widget.questionModels.length;
-        });
+          setState(() {
+            uploadStatus = 'Successfully uploaded: ${model.baseName}';
+          });
+
+          print('Successfully uploaded: ${model.baseName}');
+
+          // Small delay to show status and prevent overwhelming Firebase
+          await Future.delayed(const Duration(milliseconds: 500));
+        } catch (e) {
+          errorCount++;
+          final errorMsg = 'Failed to upload ${model.baseName}: $e';
+          errorMessages.add(errorMsg);
+          print('Error uploading ${model.baseName}: $e');
+
+          setState(() {
+            uploadStatus = 'Error uploading: ${model.baseName}';
+          });
+
+          // Continue with next question instead of stopping
+          continue;
+        }
+      }
+
+      setState(() {
+        uploadStatus = 'Upload process completed!';
+        uploadProgress = 1.0;
+      });
+
+      // Show detailed completion message
+      String message = 'Bulk upload completed!\n';
+      message += 'Total processed: ${widget.questionModels.length}\n';
+      message += 'Successfully uploaded: $uploadedCount\n';
+      if (duplicateCount > 0) {
+        message += 'Skipped duplicates: $duplicateCount\n';
+      }
+      if (errorCount > 0) {
+        message += 'Failed uploads: $errorCount\n';
+      }
+
+      // Show detailed error messages if any
+      if (errorMessages.isNotEmpty) {
+        print('Upload errors:');
+        for (String error in errorMessages) {
+          print(error);
+        }
       }
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-              'Successfully processed ${widget.questionModels.length} questions! ($uploadedCount uploaded)'),
+          content: Text(message),
+          duration: const Duration(seconds: 5),
+          action: errorCount > 0
+              ? SnackBarAction(
+                  label: 'View Errors',
+                  onPressed: () {
+                    showDialog(
+                      context: context,
+                      builder: (context) => AlertDialog(
+                        title: const Text('Upload Errors'),
+                        content: SingleChildScrollView(
+                          child: Text(errorMessages.join('\n\n')),
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text('Close'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                )
+              : null,
         ),
       );
 
-      Navigator.of(context).popUntil((route) => route.isFirst);
+      // Only navigate back if user wants to
+      if (uploadedCount > 0) {
+        await Future.delayed(const Duration(seconds: 2));
+        if (mounted) {
+          Navigator.of(context).popUntil((route) => route.isFirst);
+        }
+      }
     } catch (e) {
+      setState(() {
+        uploadStatus = 'Bulk upload failed: $e';
+      });
+
+      print('Bulk upload error: $e');
+
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error uploading questions: $e')),
+        SnackBar(
+          content: Text('Bulk upload failed: $e'),
+          duration: const Duration(seconds: 5),
+        ),
       );
     } finally {
       setState(() {
         isUploading = false;
         uploadProgress = 0.0;
+        uploadStatus = '';
       });
     }
   }
@@ -201,8 +291,6 @@ class _BulkUploadPreviewScreenState extends State<BulkUploadPreviewScreen> {
         title: const Text('Configure Questions'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
-          // Conversion Status Indicator
-          //  _buildConversionStatusIndicator(),
           IconButton(
             onPressed: _copyMetadataToAll,
             icon: const Icon(Icons.copy_all),
@@ -350,8 +438,14 @@ class _BulkUploadPreviewScreenState extends State<BulkUploadPreviewScreen> {
                     LinearProgressIndicator(value: uploadProgress),
                     const SizedBox(height: 10),
                     Text(
-                      'Uploading... ${(uploadProgress * 100).toInt()}%',
+                      uploadStatus,
                       textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    Text(
+                      'Progress: ${(uploadProgress * 100).toInt()}%',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 20),
                   ],

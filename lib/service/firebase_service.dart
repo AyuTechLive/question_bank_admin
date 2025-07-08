@@ -3,7 +3,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
 import 'package:question_bank/question_model.dart';
 
@@ -13,7 +12,36 @@ class FirebaseService {
 
   Future<void> uploadQuestion(QuestionModel question) async {
     try {
-      // Generate unique question ID
+      print('Starting upload for question...');
+
+      // Validate input files exist
+      if (question.questionFilePath == null ||
+          question.answerFilePath == null) {
+        throw Exception('Question or answer file path is null');
+      }
+
+      final questionFile = File(question.questionFilePath!);
+      final answerFile = File(question.answerFilePath!);
+
+      if (!await questionFile.exists()) {
+        throw Exception(
+            'Question file does not exist: ${question.questionFilePath}');
+      }
+
+      if (!await answerFile.exists()) {
+        throw Exception(
+            'Answer file does not exist: ${question.answerFilePath}');
+      }
+
+      print('Files exist, proceeding with upload...');
+
+      // Get file information for storage
+      final questionSize = await questionFile.length();
+      final answerSize = await answerFile.length();
+      final questionName = path.basename(question.questionFilePath!);
+      final answerName = path.basename(question.answerFilePath!);
+
+      // Generate unique question ID first
       final docRef = _firestore
           .collection('data')
           .doc(question.stream)
@@ -21,37 +49,77 @@ class FirebaseService {
           .doc();
       question.questionId = docRef.id;
 
-      // Upload question file with proper threading
+      print('Generated question ID: ${question.questionId}');
+
+      // Upload question file
       String questionFileName =
           '${question.questionId}_question${path.extension(question.questionFilePath!)}';
       final questionRef = _storage
           .ref()
           .child('questions/${question.stream}/$questionFileName');
 
-      // Use await instead of then() to avoid threading issues
-      final questionUploadTask =
-          questionRef.putFile(File(question.questionFilePath!));
-      final questionTaskSnapshot = await questionUploadTask;
-      question.questionFileUrl =
-          await questionTaskSnapshot.ref.getDownloadURL();
+      print('Uploading question file: $questionFileName');
 
-      // Upload answer file with proper threading
+      try {
+        final questionUploadTask = questionRef.putFile(questionFile);
+        final questionTaskSnapshot = await questionUploadTask;
+        question.questionFileUrl =
+            await questionTaskSnapshot.ref.getDownloadURL();
+        print(
+            'Question file uploaded successfully: ${question.questionFileUrl}');
+      } catch (e) {
+        print('Error uploading question file: $e');
+        throw Exception('Failed to upload question file: $e');
+      }
+
+      // Upload answer file
       String answerFileName =
           '${question.questionId}_answer${path.extension(question.answerFilePath!)}';
       final answerRef =
           _storage.ref().child('answers/${question.stream}/$answerFileName');
 
-      // Use await instead of then() to avoid threading issues
-      final answerUploadTask =
-          answerRef.putFile(File(question.answerFilePath!));
-      final answerTaskSnapshot = await answerUploadTask;
-      question.answerFileUrl = await answerTaskSnapshot.ref.getDownloadURL();
+      print('Uploading answer file: $answerFileName');
+
+      try {
+        final answerUploadTask = answerRef.putFile(answerFile);
+        final answerTaskSnapshot = await answerUploadTask;
+        question.answerFileUrl = await answerTaskSnapshot.ref.getDownloadURL();
+        print('Answer file uploaded successfully: ${question.answerFileUrl}');
+      } catch (e) {
+        print('Error uploading answer file: $e');
+        throw Exception('Failed to upload answer file: $e');
+      }
+
+      // Set upload timestamp and file information
+      question.uploadedAt = DateTime.now();
+      question.originalQuestionFileName = questionName;
+      question.originalAnswerFileName = answerName;
+      question.questionFileSize = questionSize;
+      question.answerFileSize = answerSize;
 
       // Save to Firestore
-      await docRef.set(question.toMap());
+      print('Saving to Firestore...');
+      try {
+        await docRef.set(question.toMap());
+        print(
+            'Successfully saved to Firestore with ID: ${question.questionId}');
+      } catch (e) {
+        print('Error saving to Firestore: $e');
+        // Try to cleanup uploaded files if Firestore save fails
+        try {
+          await questionRef.delete();
+          await answerRef.delete();
+        } catch (cleanupError) {
+          print('Error during cleanup: $cleanupError');
+        }
+        throw Exception('Failed to save to Firestore: $e');
+      }
+
+      print('Question upload completed successfully');
     } catch (e) {
+      print('Failed to upload question: $e');
       debugPrint('Failed to upload question: $e');
-      throw Exception('Failed to upload question: $e');
+      rethrow; // Re-throw to let caller handle the error
     }
   }
 
@@ -61,6 +129,27 @@ class FirebaseService {
     Function(double)? onProgress,
   ) async {
     try {
+      print('Starting upload with progress tracking...');
+
+      // Validate input files exist
+      if (question.questionFilePath == null ||
+          question.answerFilePath == null) {
+        throw Exception('Question or answer file path is null');
+      }
+
+      final questionFile = File(question.questionFilePath!);
+      final answerFile = File(question.answerFilePath!);
+
+      if (!await questionFile.exists()) {
+        throw Exception(
+            'Question file does not exist: ${question.questionFilePath}');
+      }
+
+      if (!await answerFile.exists()) {
+        throw Exception(
+            'Answer file does not exist: ${question.answerFilePath}');
+      }
+
       // Generate unique question ID
       final docRef = _firestore
           .collection('data')
@@ -78,20 +167,21 @@ class FirebaseService {
           .ref()
           .child('questions/${question.stream}/$questionFileName');
 
-      final questionUploadTask =
-          questionRef.putFile(File(question.questionFilePath!));
+      final questionUploadTask = questionRef.putFile(questionFile);
 
       // Listen to progress with proper thread handling
       questionUploadTask.snapshotEvents.listen(
         (TaskSnapshot snapshot) {
-          final progress = snapshot.bytesTransferred / snapshot.totalBytes;
-          totalProgress = progress * 0.5; // Question file is 50% of total
+          if (snapshot.totalBytes > 0) {
+            final progress = snapshot.bytesTransferred / snapshot.totalBytes;
+            totalProgress = progress * 0.5; // Question file is 50% of total
 
-          // Ensure callback runs on main thread
-          if (onProgress != null) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              onProgress(totalProgress);
-            });
+            // Ensure callback runs on main thread
+            if (onProgress != null) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                onProgress(totalProgress);
+              });
+            }
           }
         },
         onError: (error) {
@@ -109,21 +199,22 @@ class FirebaseService {
       final answerRef =
           _storage.ref().child('answers/${question.stream}/$answerFileName');
 
-      final answerUploadTask =
-          answerRef.putFile(File(question.answerFilePath!));
+      final answerUploadTask = answerRef.putFile(answerFile);
 
       // Listen to progress with proper thread handling
       answerUploadTask.snapshotEvents.listen(
         (TaskSnapshot snapshot) {
-          final progress = snapshot.bytesTransferred / snapshot.totalBytes;
-          totalProgress =
-              0.5 + (progress * 0.5); // Answer file is remaining 50%
+          if (snapshot.totalBytes > 0) {
+            final progress = snapshot.bytesTransferred / snapshot.totalBytes;
+            totalProgress =
+                0.5 + (progress * 0.5); // Answer file is remaining 50%
 
-          // Ensure callback runs on main thread
-          if (onProgress != null) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              onProgress(totalProgress);
-            });
+            // Ensure callback runs on main thread
+            if (onProgress != null) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                onProgress(totalProgress);
+              });
+            }
           }
         },
         onError: (error) {
@@ -134,6 +225,15 @@ class FirebaseService {
       final answerTaskSnapshot = await answerUploadTask;
       question.answerFileUrl = await answerTaskSnapshot.ref.getDownloadURL();
 
+      // Set upload timestamp and file information
+      question.uploadedAt = DateTime.now();
+      question.originalQuestionFileName =
+          path.basename(question.questionFilePath!);
+      question.originalAnswerFileName = path.basename(question.answerFilePath!);
+      question.questionFileSize =
+          await File(question.questionFilePath!).length();
+      question.answerFileSize = await File(question.answerFilePath!).length();
+
       // Save to Firestore
       await docRef.set(question.toMap());
 
@@ -143,43 +243,11 @@ class FirebaseService {
           onProgress(1.0);
         });
       }
+
+      print('Question upload with progress completed successfully');
     } catch (e) {
       debugPrint('Failed to upload question with progress: $e');
-      throw Exception('Failed to upload question: $e');
-    }
-  }
-
-// Add this method to your existing firebase_service.dart file
-
-  /// Check if a question with the same metadata already exists
-  Future<bool> questionExistsWithMetadata({
-    required String stream,
-    required String level,
-    required String topic,
-    required String subtopic,
-    required String language,
-    required String chapter,
-    required String type,
-  }) async {
-    try {
-      final questionsSnapshot = await _firestore
-          .collection('data')
-          .doc(stream)
-          .collection('questions')
-          .where('level', isEqualTo: level)
-          .where('topic', isEqualTo: topic)
-          .where('subtopic', isEqualTo: subtopic)
-          .where('language', isEqualTo: language)
-          .where('chapter', isEqualTo: chapter)
-          .where('type', isEqualTo: type)
-          .limit(1)
-          .get();
-
-      return questionsSnapshot.docs.isNotEmpty;
-    } catch (e) {
-      debugPrint('Error checking question existence: $e');
-      // If there's an error checking, allow upload to proceed
-      return false;
+      rethrow;
     }
   }
 

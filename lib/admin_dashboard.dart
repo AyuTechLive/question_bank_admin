@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:question_bank/question_model.dart';
 import 'package:question_bank/screens/bulk_upload_screen.dart';
-import 'package:question_bank/service/firebase_service.dart';
-import 'package:question_bank/service/metadata_service.dart';
+
+import 'package:question_bank/service/local_db.dart';
 import 'package:question_bank/widget/medta_datawidegt.dart';
 
 class AdminDashboard extends StatefulWidget {
@@ -14,513 +12,635 @@ class AdminDashboard extends StatefulWidget {
 }
 
 class _AdminDashboardState extends State<AdminDashboard> {
-  final FirebaseService _firebaseService = FirebaseService();
-  final MetadataService _metadataService = MetadataService();
-
-  final _formKey = GlobalKey<FormState>();
-
-  String? selectedStream;
-  String? selectedLevel;
-  String? selectedTopic;
-  String? selectedSubtopic;
-  String? selectedLanguage;
-  String? selectedChapter;
-  String? selectedType;
-
-  String? questionFilePath;
-  String? answerFilePath;
-
-  bool isUploading = false;
-
-  List<QuestionModel> uploadedQuestions = [];
+  final LocalDatabaseService _localDb = LocalDatabaseService();
+  int _selectedIndex = 0;
+  List<DatabaseInfo> _databases = [];
+  DatabaseInfo? _selectedDatabase;
 
   @override
   void initState() {
     super.initState();
-    _loadMetadata();
-    _loadQuestions();
+    _loadDashboardData();
   }
 
-  Future<void> _loadMetadata() async {
-    await _metadataService.loadAllMetadata();
-    setState(() {});
-  }
-
-  Future<void> _loadQuestions() async {
-    final questions = await _firebaseService.getAllQuestions();
-    setState(() {
-      uploadedQuestions = questions;
-    });
-  }
-
-  Future<void> _selectQuestionFile() async {
-    FilePickerResult? result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['doc', 'docx', 'GNM'],
-    );
-
-    if (result != null) {
+  Future<void> _loadDashboardData() async {
+    try {
+      final databases = await _localDb.getAllDatabases();
       setState(() {
-        questionFilePath = result.files.single.path;
-      });
-    }
-  }
-
-  Future<void> _selectAnswerFile() async {
-    FilePickerResult? result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['doc', 'docx', 'GNM'],
-    );
-
-    if (result != null) {
-      setState(() {
-        answerFilePath = result.files.single.path;
-      });
-    }
-  }
-
-  Future<void> _uploadQuestion() async {
-    if (_formKey.currentState!.validate() &&
-        questionFilePath != null &&
-        answerFilePath != null) {
-      setState(() {
-        isUploading = true;
-      });
-
-      try {
-        // Check if question with same metadata already exists
-        final isDuplicate = await _firebaseService.questionExistsWithMetadata(
-          stream: selectedStream!,
-          level: selectedLevel!,
-          topic: selectedTopic!,
-          subtopic: selectedSubtopic!,
-          language: selectedLanguage!,
-          chapter: selectedChapter!,
-          type: selectedType!,
-        );
-
-        if (isDuplicate) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                  'A question with the same metadata already exists. Upload skipped.'),
-            ),
-          );
-          _resetForm();
-          return;
+        _databases = databases;
+        if (_databases.isNotEmpty && _selectedDatabase == null) {
+          _selectedDatabase = _databases.first;
         }
-
-        final question = QuestionModel(
-          stream: selectedStream!,
-          level: selectedLevel!,
-          topic: selectedTopic!,
-          subtopic: selectedSubtopic!,
-          language: selectedLanguage!,
-          chapter: selectedChapter!,
-          type: selectedType!,
-          questionFilePath: questionFilePath!,
-          answerFilePath: answerFilePath!,
-        );
-
-        await _firebaseService.uploadQuestion(question);
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Question uploaded successfully!')),
-        );
-
-        _resetForm();
-        await _loadQuestions();
-      } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error uploading question: $e')),
-        );
-      } finally {
-        setState(() {
-          isUploading = false;
-        });
-      }
+      });
+    } catch (e) {
+      debugPrint('Error loading dashboard data: $e');
     }
   }
 
-  void _resetForm() {
-    setState(() {
-      selectedStream = null;
-      selectedLevel = null;
-      selectedTopic = null;
-      selectedSubtopic = null;
-      selectedLanguage = null;
-      selectedChapter = null;
-      selectedType = null;
-      questionFilePath = null;
-      answerFilePath = null;
-    });
-  }
-
-  void _openBulkUpload() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => const BulkUploadScreen(),
-      ),
-    ).then((_) {
-      // Refresh questions list when returning from bulk upload
-      _loadQuestions();
-    });
+  Widget _getSelectedPage() {
+    switch (_selectedIndex) {
+      case 0:
+        return DashboardHome(
+          databases: _databases,
+          selectedDatabase: _selectedDatabase,
+          onDatabaseSelected: (database) {
+            setState(() {
+              _selectedDatabase = database;
+            });
+          },
+          onRefresh: _loadDashboardData,
+        );
+      case 1:
+        return const EnhancedBulkUploadScreen();
+      case 2:
+        return MetadataManager(onMetadataUpdated: () {
+          // Refresh if needed
+        });
+      default:
+        return DashboardHome(
+          databases: _databases,
+          selectedDatabase: _selectedDatabase,
+          onDatabaseSelected: (database) {
+            setState(() {
+              _selectedDatabase = database;
+            });
+          },
+          onRefresh: _loadDashboardData,
+        );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Question Bank Admin Dashboard'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        actions: [
-          // Bulk Upload Button in AppBar
-          IconButton(
-            onPressed: _openBulkUpload,
-            icon: const Icon(Icons.upload_file),
-            tooltip: 'Bulk Upload',
-          ),
-        ],
-      ),
       body: Row(
         children: [
-          // Left Panel - Upload Form
-          Expanded(
-            flex: 2,
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                border: Border(
-                  right: BorderSide(color: Colors.grey.shade300),
-                ),
-              ),
-              child: Form(
-                key: _formKey,
-                child: ListView(
-                  children: [
-                    const Text(
-                      'Upload New Question',
-                      style:
-                          TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 20),
-
-                    // Bulk Upload Button
-                    ElevatedButton.icon(
-                      onPressed: _openBulkUpload,
-                      icon: const Icon(Icons.cloud_upload),
-                      label: const Text('Bulk Upload Questions'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.purple,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-
-                    const Divider(),
-                    const SizedBox(height: 20),
-
-                    const Text(
-                      'Single Question Upload',
-                      style:
-                          TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Stream Dropdown
-                    DropdownButtonFormField<String>(
-                      value: selectedStream,
-                      decoration: const InputDecoration(
-                        labelText: 'Stream',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: _metadataService.streams.map((stream) {
-                        return DropdownMenuItem(
-                          value: stream,
-                          child: Text(stream),
-                        );
-                      }).toList(),
-                      onChanged: (value) {
-                        setState(() {
-                          selectedStream = value;
-                        });
-                      },
-                      validator: (value) =>
-                          value == null ? 'Please select a stream' : null,
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Level Dropdown
-                    DropdownButtonFormField<String>(
-                      value: selectedLevel,
-                      decoration: const InputDecoration(
-                        labelText: 'Level',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: _metadataService.levels.map((level) {
-                        return DropdownMenuItem(
-                          value: level,
-                          child: Text(level),
-                        );
-                      }).toList(),
-                      onChanged: (value) {
-                        setState(() {
-                          selectedLevel = value;
-                        });
-                      },
-                      validator: (value) =>
-                          value == null ? 'Please select a level' : null,
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Topic Dropdown
-                    DropdownButtonFormField<String>(
-                      value: selectedTopic,
-                      decoration: const InputDecoration(
-                        labelText: 'Topic',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: _metadataService.topics.map((topic) {
-                        return DropdownMenuItem(
-                          value: topic,
-                          child: Text(topic),
-                        );
-                      }).toList(),
-                      onChanged: (value) {
-                        setState(() {
-                          selectedTopic = value;
-                        });
-                      },
-                      validator: (value) =>
-                          value == null ? 'Please select a topic' : null,
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Subtopic Dropdown
-                    DropdownButtonFormField<String>(
-                      value: selectedSubtopic,
-                      decoration: const InputDecoration(
-                        labelText: 'Subtopic',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: _metadataService.subtopics.map((subtopic) {
-                        return DropdownMenuItem(
-                          value: subtopic,
-                          child: Text(subtopic),
-                        );
-                      }).toList(),
-                      onChanged: (value) {
-                        setState(() {
-                          selectedSubtopic = value;
-                        });
-                      },
-                      validator: (value) =>
-                          value == null ? 'Please select a subtopic' : null,
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Language Dropdown
-                    DropdownButtonFormField<String>(
-                      value: selectedLanguage,
-                      decoration: const InputDecoration(
-                        labelText: 'Language',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: _metadataService.languages.map((language) {
-                        return DropdownMenuItem(
-                          value: language,
-                          child: Text(language),
-                        );
-                      }).toList(),
-                      onChanged: (value) {
-                        setState(() {
-                          selectedLanguage = value;
-                        });
-                      },
-                      validator: (value) =>
-                          value == null ? 'Please select a language' : null,
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Chapter Dropdown
-                    DropdownButtonFormField<String>(
-                      value: selectedChapter,
-                      decoration: const InputDecoration(
-                        labelText: 'Chapter',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: _metadataService.chapters.map((chapter) {
-                        return DropdownMenuItem(
-                          value: chapter,
-                          child: Text(chapter),
-                        );
-                      }).toList(),
-                      onChanged: (value) {
-                        setState(() {
-                          selectedChapter = value;
-                        });
-                      },
-                      validator: (value) =>
-                          value == null ? 'Please select a chapter' : null,
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Type Dropdown
-                    DropdownButtonFormField<String>(
-                      value: selectedType,
-                      decoration: const InputDecoration(
-                        labelText: 'Type',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: _metadataService.types.map((type) {
-                        return DropdownMenuItem(
-                          value: type,
-                          child: Text(type),
-                        );
-                      }).toList(),
-                      onChanged: (value) {
-                        setState(() {
-                          selectedType = value;
-                        });
-                      },
-                      validator: (value) =>
-                          value == null ? 'Please select a type' : null,
-                    ),
-                    const SizedBox(height: 20),
-
-                    // Question File Selection
-                    Card(
-                      child: ListTile(
-                        title: Text(questionFilePath != null
-                            ? 'Question: ${questionFilePath!.split('\\').last}'
-                            : 'Select Question File'),
-                        leading: const Icon(Icons.file_present),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.folder_open),
-                          onPressed: _selectQuestionFile,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-
-                    // Answer File Selection
-                    Card(
-                      child: ListTile(
-                        title: Text(answerFilePath != null
-                            ? 'Answer: ${answerFilePath!.split('\\').last}'
-                            : 'Select Answer File'),
-                        leading: const Icon(Icons.file_present),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.folder_open),
-                          onPressed: _selectAnswerFile,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-
-                    // Upload Button
-                    ElevatedButton(
-                      onPressed: isUploading ? null : _uploadQuestion,
-                      style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                      ),
-                      child: isUploading
-                          ? const CircularProgressIndicator()
-                          : const Text('Upload Question',
-                              style: TextStyle(fontSize: 16)),
-                    ),
-
-                    const SizedBox(height: 20),
-
-                    // Metadata Manager Button
-                    ElevatedButton(
-                      onPressed: () {
-                        showDialog(
-                          context: context,
-                          builder: (context) => Dialog(
-                            child: SizedBox(
-                              width: 800,
-                              height: 600,
-                              child: MetadataManager(
-                                onMetadataUpdated: _loadMetadata,
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.green,
-                      ),
-                      child: const Text('Manage Metadata'),
-                    ),
-                  ],
-                ),
-              ),
+          // Sidebar Navigation
+          Container(
+            width: 250,
+            decoration: BoxDecoration(
+              color: Colors.grey.shade100,
+              border: Border(right: BorderSide(color: Colors.grey.shade300)),
             ),
-          ),
-
-          // Right Panel - Uploaded Questions
-          Expanded(
-            flex: 3,
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            child: Column(
+              children: [
+                // Header
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  child: const Column(
                     children: [
-                      const Text(
-                        'Uploaded Questions',
+                      Icon(
+                        Icons.school,
+                        size: 48,
+                        color: Colors.blue,
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        'Question Bank',
                         style: TextStyle(
-                            fontSize: 24, fontWeight: FontWeight.bold),
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue,
+                        ),
                       ),
                       Text(
-                        'Total: ${uploadedQuestions.length}',
-                        style: const TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.w500),
+                        'Admin Dashboard',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                        ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 20),
-                  Expanded(
-                    child: uploadedQuestions.isEmpty
-                        ? const Center(child: Text('No questions uploaded yet'))
-                        : ListView.builder(
-                            itemCount: uploadedQuestions.length,
-                            itemBuilder: (context, index) {
-                              final question = uploadedQuestions[index];
-                              return Card(
-                                margin: const EdgeInsets.only(bottom: 8),
-                                child: ListTile(
-                                  title: Text(
-                                      'Question ID: ${question.questionId}'),
-                                  subtitle: Text(
-                                    'Stream: ${question.stream} | Level: ${question.level} | '
-                                    'Topic: ${question.topic} | Type: ${question.type}',
-                                  ),
-                                  trailing: IconButton(
-                                    icon: const Icon(Icons.delete,
-                                        color: Colors.red),
-                                    onPressed: () async {
-                                      await _firebaseService
-                                          .deleteQuestion(question.questionId!);
-                                      await _loadQuestions();
-                                    },
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
+                ),
+
+                const Divider(),
+
+                // Navigation Items
+                Expanded(
+                  child: ListView(
+                    children: [
+                      _buildNavItem(
+                        icon: Icons.dashboard,
+                        title: 'Dashboard',
+                        index: 0,
+                        badge: _databases.length.toString(),
+                      ),
+                      _buildNavItem(
+                        icon: Icons.cloud_upload,
+                        title: 'Bulk Upload',
+                        index: 1,
+                        badge: _databases.fold<int>(
+                                  0,
+                                  (sum, db) => sum + db.uploadQueueCount,
+                                ) >
+                                0
+                            ? _databases
+                                .fold<int>(
+                                  0,
+                                  (sum, db) => sum + db.uploadQueueCount,
+                                )
+                                .toString()
+                            : null,
+                      ),
+                      _buildNavItem(
+                        icon: Icons.settings,
+                        title: 'Metadata Manager',
+                        index: 2,
+                        badge: null,
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+
+                // Stats Footer
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      _buildStatCard(
+                        'Total Databases',
+                        _databases.length.toString(),
+                        Icons.storage,
+                        Colors.blue,
+                      ),
+                      const SizedBox(height: 8),
+                      _buildStatCard(
+                        'Total Questions',
+                        _databases
+                            .fold<int>(
+                              0,
+                              (sum, db) => sum + db.questionCount,
+                            )
+                            .toString(),
+                        Icons.quiz,
+                        Colors.green,
+                      ),
+                      const SizedBox(height: 8),
+                      _buildStatCard(
+                        'Queue Items',
+                        _databases
+                            .fold<int>(
+                              0,
+                              (sum, db) => sum + db.uploadQueueCount,
+                            )
+                            .toString(),
+                        Icons.queue,
+                        Colors.orange,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // Main Content
+          Expanded(
+            child: _getSelectedPage(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNavItem({
+    required IconData icon,
+    required String title,
+    required int index,
+    String? badge,
+  }) {
+    final isSelected = _selectedIndex == index;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      child: ListTile(
+        leading: Icon(
+          icon,
+          color: isSelected ? Colors.blue : Colors.grey.shade600,
+        ),
+        title: Text(
+          title,
+          style: TextStyle(
+            color: isSelected ? Colors.blue : Colors.grey.shade700,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+          ),
+        ),
+        trailing: badge != null
+            ? Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.red,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  badge,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              )
+            : null,
+        selected: isSelected,
+        selectedTileColor: Colors.blue.shade50,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+        ),
+        onTap: () {
+          setState(() {
+            _selectedIndex = index;
+          });
+          if (index == 1) {
+            // Refresh data when going to bulk upload
+            _loadDashboardData();
+          }
+        },
+      ),
+    );
+  }
+
+  Widget _buildStatCard(
+      String title, String value, IconData icon, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: color.withOpacity(0.8),
+                  ),
+                ),
+                Text(
+                  value,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: color,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
       ),
     );
+  }
+}
+
+class DashboardHome extends StatefulWidget {
+  final List<DatabaseInfo> databases;
+  final DatabaseInfo? selectedDatabase;
+  final Function(DatabaseInfo) onDatabaseSelected;
+  final VoidCallback onRefresh;
+
+  const DashboardHome({
+    Key? key,
+    required this.databases,
+    this.selectedDatabase,
+    required this.onDatabaseSelected,
+    required this.onRefresh,
+  }) : super(key: key);
+
+  @override
+  State<DashboardHome> createState() => _DashboardHomeState();
+}
+
+class _DashboardHomeState extends State<DashboardHome> {
+  final LocalDatabaseService _localDb = LocalDatabaseService();
+
+  @override
+  Widget build(BuildContext context) {
+    final totalQuestions = widget.databases.fold<int>(
+      0,
+      (sum, db) => sum + db.questionCount,
+    );
+    final totalQueueItems = widget.databases.fold<int>(
+      0,
+      (sum, db) => sum + db.uploadQueueCount,
+    );
+    final totalUploads = widget.databases.fold<int>(
+      0,
+      (sum, db) => sum + db.totalUploads,
+    );
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Dashboard Overview'),
+        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        automaticallyImplyLeading: false,
+        actions: [
+          IconButton(
+            onPressed: widget.onRefresh,
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh Data',
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Welcome Section
+            const Text(
+              'Welcome to Question Bank Admin',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Manage your question databases efficiently',
+              style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 32),
+
+            // Overall Stats Cards
+            Row(
+              children: [
+                Expanded(
+                  child: _buildStatsCard(
+                    'Total Databases',
+                    widget.databases.length.toString(),
+                    Icons.storage,
+                    Colors.blue,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: _buildStatsCard(
+                    'Total Questions',
+                    totalQuestions.toString(),
+                    Icons.quiz,
+                    Colors.green,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: _buildStatsCard(
+                    'Queue Items',
+                    totalQueueItems.toString(),
+                    Icons.queue,
+                    Colors.orange,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: _buildStatsCard(
+                    'Total Uploads',
+                    totalUploads.toString(),
+                    Icons.cloud_done,
+                    Colors.purple,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 32),
+
+            // Databases Section
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Question Databases',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                ElevatedButton.icon(
+                  onPressed: () {
+                    // Navigate to bulk upload to create new database
+                  },
+                  icon: const Icon(Icons.add),
+                  label: const Text('Create Database'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // Databases List
+            Expanded(
+              child: widget.databases.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.storage_outlined,
+                            size: 64,
+                            color: Colors.grey.shade400,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            'No databases found',
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: Colors.grey.shade600,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Create a new database to get started',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.grey.shade500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : GridView.builder(
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 3,
+                        crossAxisSpacing: 16,
+                        mainAxisSpacing: 16,
+                        childAspectRatio: 1.2,
+                      ),
+                      itemCount: widget.databases.length,
+                      itemBuilder: (context, index) {
+                        final database = widget.databases[index];
+                        final isSelected =
+                            widget.selectedDatabase?.databaseName ==
+                                database.databaseName;
+
+                        return Card(
+                          elevation: isSelected ? 8 : 2,
+                          color: isSelected ? Colors.blue.shade50 : null,
+                          child: InkWell(
+                            onTap: () => widget.onDatabaseSelected(database),
+                            borderRadius: BorderRadius.circular(8),
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  // Header
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        Icons.storage,
+                                        color: isSelected
+                                            ? Colors.blue
+                                            : Colors.grey,
+                                        size: 24,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          database.displayName,
+                                          style: TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.bold,
+                                            color:
+                                                isSelected ? Colors.blue : null,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                      if (isSelected)
+                                        const Icon(
+                                          Icons.check_circle,
+                                          color: Colors.blue,
+                                          size: 20,
+                                        ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 12),
+
+                                  // Stats
+                                  Expanded(
+                                    child: Column(
+                                      children: [
+                                        _buildDatabaseStat(
+                                          'Questions',
+                                          database.questionCount.toString(),
+                                          Icons.quiz,
+                                          Colors.green,
+                                        ),
+                                        const SizedBox(height: 8),
+                                        _buildDatabaseStat(
+                                          'Queue',
+                                          database.uploadQueueCount.toString(),
+                                          Icons.queue,
+                                          Colors.orange,
+                                        ),
+                                        const SizedBox(height: 8),
+                                        _buildDatabaseStat(
+                                          'Uploads',
+                                          database.totalUploads.toString(),
+                                          Icons.cloud_done,
+                                          Colors.purple,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+
+                                  // Footer
+                                  const Divider(),
+                                  Text(
+                                    'Last accessed: ${_formatDate(database.lastAccessed)}',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade600,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatsCard(
+      String title, String value, IconData icon, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Icon(icon, color: color, size: 24),
+              Text(
+                value,
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 14,
+              color: color.withOpacity(0.8),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDatabaseStat(
+      String title, String value, IconData icon, Color color) {
+    return Row(
+      children: [
+        Icon(icon, color: color, size: 16),
+        const SizedBox(width: 6),
+        Text(
+          title,
+          style: TextStyle(
+            fontSize: 12,
+            color: Colors.grey.shade600,
+          ),
+        ),
+        const Spacer(),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+            color: color,
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _formatDate(DateTime date) {
+    return '${date.day}/${date.month}/${date.year}';
   }
 }
