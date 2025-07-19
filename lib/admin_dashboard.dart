@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:question_bank/screens/bulk_upload_screen.dart';
-
+import 'package:question_bank/screens/product_key_management.dart';
 import 'package:question_bank/service/local_db.dart';
+import 'package:question_bank/service/product_key_service.dart';
 import 'package:question_bank/widget/medta_datawidegt.dart';
 
 class AdminDashboard extends StatefulWidget {
@@ -13,9 +14,11 @@ class AdminDashboard extends StatefulWidget {
 
 class _AdminDashboardState extends State<AdminDashboard> {
   final LocalDatabaseService _localDb = LocalDatabaseService();
+  final ProductKeyService _productKeyService = ProductKeyService();
   int _selectedIndex = 0;
   List<DatabaseInfo> _databases = [];
   DatabaseInfo? _selectedDatabase;
+  Map<String, dynamic> _productKeyStats = {};
 
   @override
   void initState() {
@@ -26,8 +29,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
   Future<void> _loadDashboardData() async {
     try {
       final databases = await _localDb.getAllDatabases();
+      final keyStats = await _productKeyService.getProductKeyStats();
       setState(() {
         _databases = databases;
+        _productKeyStats = keyStats;
         if (_databases.isNotEmpty && _selectedDatabase == null) {
           _selectedDatabase = _databases.first;
         }
@@ -43,6 +48,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         return DashboardHome(
           databases: _databases,
           selectedDatabase: _selectedDatabase,
+          productKeyStats: _productKeyStats,
           onDatabaseSelected: (database) {
             setState(() {
               _selectedDatabase = database;
@@ -56,10 +62,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
         return MetadataManager(onMetadataUpdated: () {
           // Refresh if needed
         });
+      case 3:
+        return const ProductKeyManagementScreen();
       default:
         return DashboardHome(
           databases: _databases,
           selectedDatabase: _selectedDatabase,
+          productKeyStats: _productKeyStats,
           onDatabaseSelected: (database) {
             setState(() {
               _selectedDatabase = database;
@@ -149,6 +158,14 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         index: 2,
                         badge: null,
                       ),
+                      _buildNavItem(
+                        icon: Icons.vpn_key,
+                        title: 'Product Keys',
+                        index: 3,
+                        badge: (_productKeyStats['totalKeys'] ?? 0) > 0
+                            ? _productKeyStats['totalKeys'].toString()
+                            : null,
+                      ),
                     ],
                   ),
                 ),
@@ -175,6 +192,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
                             .toString(),
                         Icons.quiz,
                         Colors.green,
+                      ),
+                      const SizedBox(height: 8),
+                      _buildStatCard(
+                        'Active Keys',
+                        (_productKeyStats['activeKeys'] ?? 0).toString(),
+                        Icons.vpn_key,
+                        Colors.purple,
                       ),
                       const SizedBox(height: 8),
                       _buildStatCard(
@@ -252,8 +276,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
           setState(() {
             _selectedIndex = index;
           });
-          if (index == 1) {
-            // Refresh data when going to bulk upload
+          if (index == 1 || index == 3) {
+            // Refresh data when going to bulk upload or product keys
             _loadDashboardData();
           }
         },
@@ -305,6 +329,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
 class DashboardHome extends StatefulWidget {
   final List<DatabaseInfo> databases;
   final DatabaseInfo? selectedDatabase;
+  final Map<String, dynamic> productKeyStats;
   final Function(DatabaseInfo) onDatabaseSelected;
   final VoidCallback onRefresh;
 
@@ -312,6 +337,7 @@ class DashboardHome extends StatefulWidget {
     Key? key,
     required this.databases,
     this.selectedDatabase,
+    required this.productKeyStats,
     required this.onDatabaseSelected,
     required this.onRefresh,
   }) : super(key: key);
@@ -363,7 +389,7 @@ class _DashboardHomeState extends State<DashboardHome> {
             ),
             const SizedBox(height: 8),
             Text(
-              'Manage your question databases efficiently',
+              'Manage your question databases and product keys efficiently',
               style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
             ),
             const SizedBox(height: 32),
@@ -391,22 +417,104 @@ class _DashboardHomeState extends State<DashboardHome> {
                 const SizedBox(width: 16),
                 Expanded(
                   child: _buildStatsCard(
+                    'Active Product Keys',
+                    (widget.productKeyStats['activeKeys'] ?? 0).toString(),
+                    Icons.vpn_key,
+                    Colors.purple,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: _buildStatsCard(
                     'Queue Items',
                     totalQueueItems.toString(),
                     Icons.queue,
                     Colors.orange,
                   ),
                 ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: _buildStatsCard(
-                    'Total Uploads',
-                    totalUploads.toString(),
-                    Icons.cloud_done,
-                    Colors.purple,
-                  ),
-                ),
               ],
+            ),
+            const SizedBox(height: 24),
+
+            // Product Key Stats Section
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade50,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey.shade200),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.vpn_key, color: Colors.purple),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Product Key Statistics',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _buildMiniStatCard(
+                          'Total Keys',
+                          (widget.productKeyStats['totalKeys'] ?? 0).toString(),
+                          Icons.vpn_key,
+                          Colors.blue,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _buildMiniStatCard(
+                          'Active',
+                          (widget.productKeyStats['activeKeys'] ?? 0)
+                              .toString(),
+                          Icons.check_circle,
+                          Colors.green,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _buildMiniStatCard(
+                          'Expired',
+                          (widget.productKeyStats['expiredKeys'] ?? 0)
+                              .toString(),
+                          Icons.schedule,
+                          Colors.orange,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _buildMiniStatCard(
+                          'Disabled',
+                          (widget.productKeyStats['disabledKeys'] ?? 0)
+                              .toString(),
+                          Icons.block,
+                          Colors.red,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _buildMiniStatCard(
+                          'Total Devices',
+                          (widget.productKeyStats['totalDevices'] ?? 0)
+                              .toString(),
+                          Icons.devices,
+                          Colors.teal,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: 32),
 
@@ -418,16 +526,32 @@ class _DashboardHomeState extends State<DashboardHome> {
                   'Question Databases',
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 ),
-                ElevatedButton.icon(
-                  onPressed: () {
-                    // Navigate to bulk upload to create new database
-                  },
-                  icon: const Icon(Icons.add),
-                  label: const Text('Create Database'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.green,
-                    foregroundColor: Colors.white,
-                  ),
+                Row(
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        // Navigate to product keys management
+                      },
+                      icon: const Icon(Icons.vpn_key),
+                      label: const Text('Manage Keys'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.purple,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        // Navigate to bulk upload to create new database
+                      },
+                      icon: const Icon(Icons.add),
+                      label: const Text('Create Database'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -608,6 +732,40 @@ class _DashboardHomeState extends State<DashboardHome> {
               fontSize: 14,
               color: color.withOpacity(0.8),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMiniStatCard(
+      String title, String value, IconData icon, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(height: 6),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 10,
+              color: color.withOpacity(0.8),
+            ),
+            textAlign: TextAlign.center,
           ),
         ],
       ),
