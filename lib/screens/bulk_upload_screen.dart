@@ -8,6 +8,8 @@ import 'package:question_bank/question_model.dart';
 import 'package:question_bank/widget/doc_viewer.dart';
 import 'dart:io';
 import 'package:path/path.dart' as path;
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 
 class EnhancedBulkUploadScreen extends StatefulWidget {
   const EnhancedBulkUploadScreen({Key? key}) : super(key: key);
@@ -17,7 +19,8 @@ class EnhancedBulkUploadScreen extends StatefulWidget {
       _EnhancedBulkUploadScreenState();
 }
 
-class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
+class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
+    with WidgetsBindingObserver {
   final LocalDatabaseService _localDb = LocalDatabaseService();
   final MetadataService _metadataService = MetadataService();
   final FirebaseService _firebaseService = FirebaseService();
@@ -30,11 +33,18 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
   QuestionPairWithQueue? selectedPair;
   bool isLoading = false;
   bool isUploading = false;
+  bool _disposed = false;
   double uploadProgress = 0.0;
   String uploadStatus = '';
   int uploadQueueCount = 0;
   String searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
+
+  // Upload management
+  StreamSubscription? _uploadSubscription;
+  Completer<void>? _uploadCompleter;
+  int _currentUploadIndex = 0;
+  int _totalUploadItems = 0;
 
   // Metadata form data
   String? selectedStream;
@@ -48,6 +58,7 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadMetadata();
     _loadDatabases();
     _searchController.addListener(_onSearchChanged);
@@ -55,12 +66,24 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
 
   @override
   void dispose() {
+    _disposed = true;
+    WidgetsBinding.instance.removeObserver(this);
+    _cancelUpload();
     _scrollController.dispose();
     _searchController.dispose();
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _cancelUpload();
+    }
+  }
+
   void _onSearchChanged() {
+    if (_disposed) return;
     setState(() {
       searchQuery = _searchController.text.toLowerCase();
       _filterQuestions();
@@ -68,6 +91,7 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
   }
 
   void _filterQuestions() {
+    if (_disposed) return;
     if (searchQuery.isEmpty) {
       filteredQuestionPairs = List.from(questionPairs);
     } else {
@@ -79,37 +103,53 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
   }
 
   Future<void> _loadMetadata() async {
-    await _metadataService.loadAllMetadata();
-    setState(() {});
+    if (_disposed) return;
+    try {
+      await _metadataService.loadAllMetadata();
+      if (!_disposed) {
+        setState(() {});
+      }
+    } catch (e) {
+      debugPrint('Error loading metadata: $e');
+      if (!_disposed) {
+        _showErrorSnackBar('Error loading metadata: $e');
+      }
+    }
   }
 
   Future<void> _loadDatabases() async {
+    if (_disposed) return;
     setState(() {
       isLoading = true;
     });
 
     try {
       final dbs = await _localDb.getAllDatabases();
-      setState(() {
-        databases = dbs;
-        if (databases.isNotEmpty && selectedDatabase == null) {
-          // Auto-select the most recently accessed database
-          selectedDatabase = databases.first;
-          _selectDatabase(selectedDatabase!);
-        }
-      });
+      if (!_disposed) {
+        setState(() {
+          databases = dbs;
+          if (databases.isNotEmpty && selectedDatabase == null) {
+            selectedDatabase = databases.first;
+            _selectDatabase(selectedDatabase!);
+          }
+        });
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error loading databases: $e')),
-      );
+      debugPrint('Error loading databases: $e');
+      if (!_disposed) {
+        _showErrorSnackBar('Error loading databases: $e');
+      }
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      if (!_disposed) {
+        setState(() {
+          isLoading = false;
+        });
+      }
     }
   }
 
   Future<void> _selectDatabase(DatabaseInfo database) async {
+    if (_disposed) return;
     setState(() {
       isLoading = true;
       selectedDatabase = database;
@@ -120,18 +160,21 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
       await _loadQuestionPairs();
       await _loadUploadQueueCount();
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error selecting database: $e')),
-      );
+      debugPrint('Error selecting database: $e');
+      if (!_disposed) {
+        _showErrorSnackBar('Error selecting database: $e');
+      }
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      if (!_disposed) {
+        setState(() {
+          isLoading = false;
+        });
+      }
     }
   }
 
   Future<void> _loadQuestionPairs() async {
-    if (selectedDatabase == null) return;
+    if (selectedDatabase == null || _disposed) return;
 
     setState(() {
       isLoading = true;
@@ -140,33 +183,46 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
     try {
       final pairs = await _localDb.getQuestionPairsWithQueue();
 
-      setState(() {
-        questionPairs = pairs;
-        _filterQuestions();
-        if (questionPairs.isNotEmpty && selectedPair == null) {
-          selectedPair = questionPairs.first;
-          _loadMetadataFromQueue();
-        }
-      });
+      if (!_disposed) {
+        setState(() {
+          questionPairs = pairs;
+          _filterQuestions();
+          if (questionPairs.isNotEmpty && selectedPair == null) {
+            selectedPair = questionPairs.first;
+            _loadMetadataFromQueue();
+          }
+        });
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error loading question pairs: $e')),
-      );
+      debugPrint('Error loading question pairs: $e');
+      if (!_disposed) {
+        _showErrorSnackBar('Error loading question pairs: $e');
+      }
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      if (!_disposed) {
+        setState(() {
+          isLoading = false;
+        });
+      }
     }
   }
 
   Future<void> _loadUploadQueueCount() async {
-    final count = await _localDb.getUploadQueueCount();
-    setState(() {
-      uploadQueueCount = count;
-    });
+    if (_disposed) return;
+    try {
+      final count = await _localDb.getUploadQueueCount();
+      if (!_disposed) {
+        setState(() {
+          uploadQueueCount = count;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading upload queue count: $e');
+    }
   }
 
   void _loadMetadataFromQueue() {
+    if (_disposed) return;
     if (selectedPair?.queueItem != null) {
       final queue = selectedPair!.queueItem!;
       setState(() {
@@ -184,6 +240,7 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
   }
 
   void _clearMetadata() {
+    if (_disposed) return;
     setState(() {
       selectedStream = null;
       selectedLevel = null;
@@ -195,12 +252,36 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
     });
   }
 
+  void _showErrorSnackBar(String message) {
+    if (_disposed) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  void _showSuccessSnackBar(String message) {
+    if (_disposed) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.green,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
   Future<void> _showCreateDatabaseDialog() async {
+    if (_disposed) return;
+
     String? questionsFolder = await FilePicker.platform.getDirectoryPath();
-    if (questionsFolder == null) return;
+    if (questionsFolder == null || _disposed) return;
 
     String? answersFolder = await FilePicker.platform.getDirectoryPath();
-    if (answersFolder == null) return;
+    if (answersFolder == null || _disposed) return;
 
     String databaseName = '';
 
@@ -267,7 +348,7 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
       },
     );
 
-    if (result != null && result.isNotEmpty) {
+    if (result != null && result.isNotEmpty && !_disposed) {
       setState(() {
         isLoading = true;
       });
@@ -279,33 +360,35 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
           answersFolder: answersFolder,
         );
 
-        await _loadDatabases();
+        if (!_disposed) {
+          await _loadDatabases();
 
-        // Select the newly created database
-        final newDb = databases.firstWhere(
-          (db) => db.displayName == result,
-        );
-        await _selectDatabase(newDb);
+          final newDb = databases.firstWhere(
+            (db) => db.displayName == result,
+          );
+          await _selectDatabase(newDb);
+          await _retrieveQuestions(questionsFolder, answersFolder);
 
-        // Load questions from the folders
-        await _retrieveQuestions(questionsFolder, answersFolder);
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Database "$result" created successfully')),
-        );
+          _showSuccessSnackBar('Database "$result" created successfully');
+        }
       } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error creating database: $e')),
-        );
+        debugPrint('Error creating database: $e');
+        if (!_disposed) {
+          _showErrorSnackBar('Error creating database: $e');
+        }
       } finally {
-        setState(() {
-          isLoading = false;
-        });
+        if (!_disposed) {
+          setState(() {
+            isLoading = false;
+          });
+        }
       }
     }
   }
 
   Future<void> _showDatabaseSelector() async {
+    if (_disposed) return;
+
     await showDialog(
       context: context,
       builder: (BuildContext context) {
@@ -322,7 +405,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
             height: 400,
             child: Column(
               children: [
-                // Create new database button
                 Container(
                   width: double.infinity,
                   margin: const EdgeInsets.only(bottom: 16),
@@ -339,10 +421,7 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                     ),
                   ),
                 ),
-
                 const Divider(),
-
-                // Existing databases list
                 Expanded(
                   child: databases.isEmpty
                       ? const Center(
@@ -476,6 +555,8 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
 
   Future<void> _retrieveQuestions(
       String questionsPath, String answersPath) async {
+    if (_disposed) return;
+
     setState(() {
       isLoading = true;
     });
@@ -488,7 +569,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
         throw Exception('One or both folders do not exist');
       }
 
-      // Get all files from directories
       final questionFiles = questionsDir
           .listSync()
           .where((file) => file is File && _isValidDocumentFile(file.path))
@@ -501,18 +581,18 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
           .cast<File>()
           .toList();
 
-      // Create answer file map
       final Map<String, File> answerFileMap = {};
       for (final answerFile in answerFiles) {
         final baseName = _getBaseFileName(answerFile.path);
         answerFileMap[baseName] = answerFile;
       }
 
-      // Match question and answer files
       List<LocalQuestionPair> newPairs = [];
       final now = DateTime.now();
 
       for (final questionFile in questionFiles) {
+        if (_disposed) break;
+
         final baseName = _getBaseFileName(questionFile.path);
         final answerFile = answerFileMap[baseName];
 
@@ -534,33 +614,26 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
         }
       }
 
-      if (newPairs.isNotEmpty) {
-        // Insert new pairs into local database
+      if (newPairs.isNotEmpty && !_disposed) {
         await _localDb.insertQuestionPairs(newPairs);
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Added ${newPairs.length} new question-answer pairs'),
-          ),
-        );
-
-        // Reload the question pairs and databases
+        _showSuccessSnackBar(
+            'Added ${newPairs.length} new question-answer pairs');
         await _loadQuestionPairs();
         await _loadDatabases();
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('No new matching question-answer pairs found')),
-        );
+      } else if (!_disposed) {
+        _showSuccessSnackBar('No new matching question-answer pairs found');
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error retrieving questions: $e')),
-      );
+      debugPrint('Error retrieving questions: $e');
+      if (!_disposed) {
+        _showErrorSnackBar('Error retrieving questions: $e');
+      }
     } finally {
-      setState(() {
-        isLoading = false;
-      });
+      if (!_disposed) {
+        setState(() {
+          isLoading = false;
+        });
+      }
     }
   }
 
@@ -593,40 +666,28 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
   }
 
   Future<void> _addToQueue() async {
-    if (selectedPair == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No question selected')),
-      );
+    if (selectedPair == null || _disposed) {
+      _showErrorSnackBar('No question selected');
       return;
     }
 
     if (selectedPair!.questionPair.id == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Invalid question pair - missing ID')),
-      );
+      _showErrorSnackBar('Invalid question pair - missing ID');
       return;
     }
 
     if (!_isMetadataValid()) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please fill all metadata fields')),
-      );
+      _showErrorSnackBar('Please fill all metadata fields');
       return;
     }
 
     if (uploadQueueCount >= 50) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Upload queue is full (maximum 50 items)')),
-      );
+      _showErrorSnackBar('Upload queue is full (maximum 50 items)');
       return;
     }
 
     if (selectedPair!.isInQueue) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('This question is already in the upload queue')),
-      );
+      _showErrorSnackBar('This question is already in the upload queue');
       return;
     }
 
@@ -644,49 +705,61 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
       );
 
       await _localDb.addToUploadQueue(queueItem);
-      await _loadQuestionPairs();
-      await _loadUploadQueueCount();
-      await _loadDatabases(); // Refresh database stats
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Added to upload queue')),
-      );
-
-      _clearMetadata();
+      if (!_disposed) {
+        await _loadQuestionPairs();
+        await _loadUploadQueueCount();
+        await _loadDatabases();
+        _showSuccessSnackBar('Added to upload queue');
+        _clearMetadata();
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error adding to queue: $e')),
-      );
       debugPrint('Error adding to queue: $e');
+      if (!_disposed) {
+        _showErrorSnackBar('Error adding to queue: $e');
+      }
     }
   }
 
   Future<void> _removeFromQueue() async {
-    if (selectedPair?.queueItem == null) return;
+    if (selectedPair?.queueItem == null || _disposed) return;
 
     try {
       await _localDb.removeFromUploadQueue(selectedPair!.queueItem!.id!);
-      await _loadQuestionPairs();
-      await _loadUploadQueueCount();
-      await _loadDatabases(); // Refresh database stats
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Removed from upload queue')),
-      );
-
-      _clearMetadata();
+      if (!_disposed) {
+        await _loadQuestionPairs();
+        await _loadUploadQueueCount();
+        await _loadDatabases();
+        _showSuccessSnackBar('Removed from upload queue');
+        _clearMetadata();
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error removing from queue: $e')),
-      );
+      debugPrint('Error removing from queue: $e');
+      if (!_disposed) {
+        _showErrorSnackBar('Error removing from queue: $e');
+      }
+    }
+  }
+
+  void _cancelUpload() {
+    _uploadSubscription?.cancel();
+    _uploadCompleter?.complete();
+    if (!_disposed && isUploading) {
+      setState(() {
+        isUploading = false;
+        uploadProgress = 0.0;
+        uploadStatus = 'Upload cancelled';
+      });
     }
   }
 
   Future<void> _uploadQueue() async {
-    if (uploadQueueCount == 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Upload queue is empty')),
-      );
+    if (uploadQueueCount == 0 || _disposed) {
+      _showErrorSnackBar('Upload queue is empty');
+      return;
+    }
+
+    if (isUploading) {
+      _showErrorSnackBar('Upload already in progress');
       return;
     }
 
@@ -694,30 +767,46 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
       isUploading = true;
       uploadProgress = 0.0;
       uploadStatus = 'Starting upload...';
+      _currentUploadIndex = 0;
     });
+
+    _uploadCompleter = Completer<void>();
 
     try {
       final queueItems = await _localDb.getUploadQueue();
+      _totalUploadItems = queueItems.length;
+
+      if (queueItems.isEmpty) {
+        throw Exception('No items in upload queue');
+      }
+
       int uploadedCount = 0;
       int errorCount = 0;
       List<String> errorMessages = [];
 
+      // Process items one by one to prevent memory issues
       for (int i = 0; i < queueItems.length; i++) {
-        final queueItem = queueItems[i];
+        if (_disposed || _uploadCompleter!.isCompleted) break;
 
-        setState(() {
-          uploadStatus = 'Uploading ${i + 1}/${queueItems.length}...';
-          uploadProgress = (i + 1) / queueItems.length;
-        });
+        final queueItem = queueItems[i];
+        _currentUploadIndex = i;
+
+        if (!_disposed) {
+          setState(() {
+            uploadStatus = 'Uploading ${i + 1}/${queueItems.length}...';
+            uploadProgress = i / queueItems.length;
+          });
+        }
 
         try {
-          // Find the corresponding question pair
+          // Add small delay to prevent overwhelming the system
+          await Future.delayed(const Duration(milliseconds: 100));
+
           final questionPair = questionPairs
               .firstWhere(
                   (pair) => pair.questionPair.id == queueItem.questionPairId)
               .questionPair;
 
-          // Create question model
           final question = QuestionModel(
             stream: queueItem.stream,
             level: queueItem.level,
@@ -730,61 +819,74 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
             answerFilePath: questionPair.answerFilePath,
           );
 
-          // Upload the question
-          await _firebaseService.uploadQuestion(question);
+          // Use the simplified upload method that doesn't have threading issues
+          await _firebaseService.uploadQuestion(question).timeout(
+                const Duration(minutes: 5),
+                onTimeout: () => throw TimeoutException(
+                    'Upload timeout', const Duration(minutes: 5)),
+              );
 
-          // Increment upload count in local DB
-          await _localDb.incrementUploadCount(questionPair.id!);
+          if (!_disposed) {
+            await _localDb.incrementUploadCount(questionPair.id!);
+            await _localDb.removeFromUploadQueue(queueItem.id!);
+            uploadedCount++;
 
-          // Remove from upload queue
-          await _localDb.removeFromUploadQueue(queueItem.id!);
+            // Update progress after each successful upload
+            setState(() {
+              uploadProgress = (i + 1) / queueItems.length;
+            });
+          }
 
-          uploadedCount++;
+          // Force garbage collection periodically
+          if (i % 5 == 0) {
+            await Future.delayed(const Duration(milliseconds: 50));
+          }
         } catch (e) {
+          debugPrint('Upload error for item ${queueItem.questionPairId}: $e');
           errorCount++;
           errorMessages.add('Failed to upload ${queueItem.questionPairId}: $e');
           continue;
         }
       }
 
-      await _loadQuestionPairs();
-      await _loadUploadQueueCount();
-      await _loadDatabases(); // Refresh database stats
+      if (!_disposed) {
+        await _loadQuestionPairs();
+        await _loadUploadQueueCount();
+        await _loadDatabases();
 
-      setState(() {
-        uploadStatus = 'Upload completed!';
-        uploadProgress = 1.0;
-      });
+        setState(() {
+          uploadStatus = 'Upload completed!';
+          uploadProgress = 1.0;
+        });
 
-      String message = 'Upload completed!\n';
-      message += 'Successful: $uploadedCount\n';
-      if (errorCount > 0) {
-        message += 'Failed: $errorCount';
+        String message = 'Upload completed!\n';
+        message += 'Successful: $uploadedCount\n';
+        if (errorCount > 0) {
+          message += 'Failed: $errorCount';
+        }
+
+        _showSuccessSnackBar(message);
       }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(message),
-          duration: const Duration(seconds: 5),
-        ),
-      );
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Upload failed: $e')),
-      );
+      debugPrint('Upload failed: $e');
+      if (!_disposed) {
+        _showErrorSnackBar('Upload failed: $e');
+      }
     } finally {
-      setState(() {
-        isUploading = false;
-        uploadProgress = 0.0;
-        uploadStatus = '';
-      });
+      if (!_disposed) {
+        setState(() {
+          isUploading = false;
+          uploadProgress = 0.0;
+          uploadStatus = '';
+        });
+      }
+      _uploadCompleter?.complete();
     }
   }
 
   Future<void> _showMetadataDialog(BuildContext context) async {
-    if (selectedPair == null) return;
+    if (selectedPair == null || _disposed) return;
 
-    // Load existing metadata if in queue
     String? dialogStream = selectedStream;
     String? dialogLevel = selectedLevel;
     String? dialogTopic = selectedTopic;
@@ -792,6 +894,31 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
     String? dialogLanguage = selectedLanguage;
     String? dialogChapter = selectedChapter;
     String? dialogType = selectedType;
+
+    List<String> availableTopics = [];
+    List<String> availableSubtopics = [];
+    List<String> availableChapters = [];
+
+    void updateAvailableOptions() {
+      availableTopics = _metadataService.getTopicsForStream(dialogStream);
+      availableSubtopics = _metadataService.getSubtopicsForTopic(dialogTopic);
+      availableChapters = _metadataService.getChaptersForTopic(dialogTopic);
+    }
+
+    void validateAndClearInvalidSelections() {
+      if (dialogTopic != null && !availableTopics.contains(dialogTopic)) {
+        dialogTopic = null;
+      }
+      if (dialogSubtopic != null &&
+          !availableSubtopics.contains(dialogSubtopic)) {
+        dialogSubtopic = null;
+      }
+      if (dialogChapter != null && !availableChapters.contains(dialogChapter)) {
+        dialogChapter = null;
+      }
+    }
+
+    updateAvailableOptions();
 
     final result = await showDialog<Map<String, String?>>(
       context: context,
@@ -809,6 +936,15 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                   dialogType != null;
             }
 
+            bool isHierarchyValid() {
+              return _metadataService.isValidHierarchy(
+                dialogStream,
+                dialogTopic,
+                dialogSubtopic,
+                dialogChapter,
+              );
+            }
+
             return AlertDialog(
               title: Row(
                 children: [
@@ -822,13 +958,12 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                   ),
                 ],
               ),
-              content: Container(
+              content: SizedBox(
                 width: 600,
-                height: 500,
+                height: 600,
                 child: SingleChildScrollView(
                   child: Column(
                     children: [
-                      // Upload count info
                       if (selectedPair!.questionPair.uploadCount > 0)
                         Container(
                           padding: const EdgeInsets.all(12),
@@ -851,17 +986,51 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                             ],
                           ),
                         ),
-
-                      // Row 1: Stream and Level
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        margin: const EdgeInsets.only(bottom: 16),
+                        decoration: BoxDecoration(
+                          color: Colors.amber.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.amber.shade200),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(Icons.account_tree,
+                                    color: Colors.amber.shade700, size: 20),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Hierarchical Metadata',
+                                  style: TextStyle(
+                                    color: Colors.amber.shade700,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Topics depend on streams, subtopics and chapters depend on topics.',
+                              style: TextStyle(
+                                  color: Colors.amber.shade700, fontSize: 12),
+                            ),
+                          ],
+                        ),
+                      ),
                       Row(
                         children: [
                           Expanded(
                             child: DropdownButtonFormField<String>(
                               value: dialogStream,
                               decoration: const InputDecoration(
-                                labelText: 'Stream',
+                                labelText: 'Stream *',
                                 border: OutlineInputBorder(),
                                 isDense: true,
+                                helperText: 'Select exam stream first',
                               ),
                               items: _metadataService.streams.map((stream) {
                                 return DropdownMenuItem(
@@ -872,6 +1041,10 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                                   : (value) {
                                       setDialogState(() {
                                         dialogStream = value;
+                                        dialogTopic = null;
+                                        dialogSubtopic = null;
+                                        dialogChapter = null;
+                                        updateAvailableOptions();
                                       });
                                     },
                             ),
@@ -881,7 +1054,7 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                             child: DropdownButtonFormField<String>(
                               value: dialogLevel,
                               decoration: const InputDecoration(
-                                labelText: 'Level',
+                                labelText: 'Level *',
                                 border: OutlineInputBorder(),
                                 isDense: true,
                               ),
@@ -901,65 +1074,102 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                         ],
                       ),
                       const SizedBox(height: 16),
-
-                      // Row 2: Topic and Subtopic
+                      DropdownButtonFormField<String>(
+                        value: dialogTopic,
+                        decoration: InputDecoration(
+                          labelText: 'Subject/Topic *',
+                          border: const OutlineInputBorder(),
+                          isDense: true,
+                          helperText: dialogStream == null
+                              ? 'Select a stream first'
+                              : 'Available for ${dialogStream} (${availableTopics.length})',
+                          enabled:
+                              dialogStream != null && !selectedPair!.isInQueue,
+                        ),
+                        items: availableTopics.map((topic) {
+                          return DropdownMenuItem(
+                              value: topic, child: Text(topic));
+                        }).toList(),
+                        onChanged:
+                            (dialogStream != null && !selectedPair!.isInQueue)
+                                ? (value) {
+                                    setDialogState(() {
+                                      dialogTopic = value;
+                                      dialogSubtopic = null;
+                                      dialogChapter = null;
+                                      updateAvailableOptions();
+                                    });
+                                  }
+                                : null,
+                      ),
+                      const SizedBox(height: 16),
                       Row(
                         children: [
                           Expanded(
                             child: DropdownButtonFormField<String>(
-                              value: dialogTopic,
-                              decoration: const InputDecoration(
-                                labelText: 'Topic',
-                                border: OutlineInputBorder(),
+                              value: dialogSubtopic,
+                              decoration: InputDecoration(
+                                labelText: 'Subtopic *',
+                                border: const OutlineInputBorder(),
                                 isDense: true,
+                                helperText: dialogTopic == null
+                                    ? 'Select topic first'
+                                    : '${availableSubtopics.length} available',
+                                enabled: dialogTopic != null &&
+                                    !selectedPair!.isInQueue,
                               ),
-                              items: _metadataService.topics.map((topic) {
+                              items: availableSubtopics.map((subtopic) {
                                 return DropdownMenuItem(
-                                    value: topic, child: Text(topic));
+                                    value: subtopic, child: Text(subtopic));
                               }).toList(),
-                              onChanged: selectedPair!.isInQueue
-                                  ? null
-                                  : (value) {
+                              onChanged: (dialogTopic != null &&
+                                      !selectedPair!.isInQueue)
+                                  ? (value) {
                                       setDialogState(() {
-                                        dialogTopic = value;
+                                        dialogSubtopic = value;
                                       });
-                                    },
+                                    }
+                                  : null,
                             ),
                           ),
                           const SizedBox(width: 16),
                           Expanded(
                             child: DropdownButtonFormField<String>(
-                              value: dialogSubtopic,
-                              decoration: const InputDecoration(
-                                labelText: 'Subtopic',
-                                border: OutlineInputBorder(),
+                              value: dialogChapter,
+                              decoration: InputDecoration(
+                                labelText: 'Chapter *',
+                                border: const OutlineInputBorder(),
                                 isDense: true,
+                                helperText: dialogTopic == null
+                                    ? 'Select topic first'
+                                    : '${availableChapters.length} available',
+                                enabled: dialogTopic != null &&
+                                    !selectedPair!.isInQueue,
                               ),
-                              items: _metadataService.subtopics.map((subtopic) {
+                              items: availableChapters.map((chapter) {
                                 return DropdownMenuItem(
-                                    value: subtopic, child: Text(subtopic));
+                                    value: chapter, child: Text(chapter));
                               }).toList(),
-                              onChanged: selectedPair!.isInQueue
-                                  ? null
-                                  : (value) {
+                              onChanged: (dialogTopic != null &&
+                                      !selectedPair!.isInQueue)
+                                  ? (value) {
                                       setDialogState(() {
-                                        dialogSubtopic = value;
+                                        dialogChapter = value;
                                       });
-                                    },
+                                    }
+                                  : null,
                             ),
                           ),
                         ],
                       ),
                       const SizedBox(height: 16),
-
-                      // Row 3: Language and Chapter
                       Row(
                         children: [
                           Expanded(
                             child: DropdownButtonFormField<String>(
                               value: dialogLanguage,
                               decoration: const InputDecoration(
-                                labelText: 'Language',
+                                labelText: 'Language *',
                                 border: OutlineInputBorder(),
                                 isDense: true,
                               ),
@@ -979,61 +1189,37 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                           const SizedBox(width: 16),
                           Expanded(
                             child: DropdownButtonFormField<String>(
-                              value: dialogChapter,
+                              value: dialogType,
                               decoration: const InputDecoration(
-                                labelText: 'Chapter',
+                                labelText: 'Question Type *',
                                 border: OutlineInputBorder(),
                                 isDense: true,
                               ),
-                              items: _metadataService.chapters.map((chapter) {
+                              items: _metadataService.types.map((type) {
                                 return DropdownMenuItem(
-                                    value: chapter, child: Text(chapter));
+                                    value: type, child: Text(type));
                               }).toList(),
                               onChanged: selectedPair!.isInQueue
                                   ? null
                                   : (value) {
                                       setDialogState(() {
-                                        dialogChapter = value;
+                                        dialogType = value;
                                       });
                                     },
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 16),
-
-                      // Row 4: Type (full width)
-                      DropdownButtonFormField<String>(
-                        value: dialogType,
-                        decoration: const InputDecoration(
-                          labelText: 'Question Type',
-                          border: OutlineInputBorder(),
-                          isDense: true,
-                        ),
-                        items: _metadataService.types.map((type) {
-                          return DropdownMenuItem(
-                              value: type, child: Text(type));
-                        }).toList(),
-                        onChanged: selectedPair!.isInQueue
-                            ? null
-                            : (value) {
-                                setDialogState(() {
-                                  dialogType = value;
-                                });
-                              },
-                      ),
                       const SizedBox(height: 20),
-
-                      // Validation Status
                       Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: isValid()
+                          color: isValid() && isHierarchyValid()
                               ? Colors.green.shade50
                               : Colors.orange.shade50,
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(
-                            color: isValid()
+                            color: isValid() && isHierarchyValid()
                                 ? Colors.green.shade200
                                 : Colors.orange.shade200,
                           ),
@@ -1041,18 +1227,24 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                         child: Row(
                           children: [
                             Icon(
-                              isValid() ? Icons.check_circle : Icons.warning,
-                              color: isValid() ? Colors.green : Colors.orange,
+                              isValid() && isHierarchyValid()
+                                  ? Icons.check_circle
+                                  : Icons.warning,
+                              color: isValid() && isHierarchyValid()
+                                  ? Colors.green
+                                  : Colors.orange,
                               size: 20,
                             ),
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
-                                isValid()
-                                    ? 'All metadata fields completed'
-                                    : 'Please fill all metadata fields',
+                                isValid() && isHierarchyValid()
+                                    ? 'All metadata fields completed and hierarchy is valid'
+                                    : !isValid()
+                                        ? 'Please fill all metadata fields'
+                                        : 'Invalid hierarchy: Please check your selections',
                                 style: TextStyle(
-                                  color: isValid()
+                                  color: isValid() && isHierarchyValid()
                                       ? Colors.green.shade700
                                       : Colors.orange.shade700,
                                   fontSize: 14,
@@ -1063,8 +1255,57 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                           ],
                         ),
                       ),
-
-                      // Queue status for existing items
+                      if (dialogStream != null && dialogTopic != null) ...[
+                        const SizedBox(height: 12),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.shade50,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.blue.shade200),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Current Hierarchy:',
+                                style: TextStyle(
+                                  color: Colors.blue.shade700,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                '$dialogStream → $dialogTopic',
+                                style: TextStyle(
+                                  color: Colors.blue.shade700,
+                                  fontSize: 12,
+                                  fontFamily: 'monospace',
+                                ),
+                              ),
+                              if (dialogSubtopic != null)
+                                Text(
+                                  '  ↳ Subtopic: $dialogSubtopic',
+                                  style: TextStyle(
+                                    color: Colors.blue.shade700,
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                              if (dialogChapter != null)
+                                Text(
+                                  '  ↳ Chapter: $dialogChapter',
+                                  style: TextStyle(
+                                    color: Colors.blue.shade700,
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
                       if (selectedPair!.isInQueue) ...[
                         const SizedBox(height: 16),
                         Container(
@@ -1097,13 +1338,10 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                 ),
               ),
               actions: [
-                // Cancel Button
                 TextButton(
                   onPressed: () => Navigator.pop(context),
                   child: const Text('Cancel'),
                 ),
-
-                // Remove from Queue (if in queue)
                 if (selectedPair!.isInQueue)
                   ElevatedButton.icon(
                     onPressed: () {
@@ -1116,29 +1354,35 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                       foregroundColor: Colors.white,
                     ),
                   ),
-
-                // Add to Queue (if not in queue and valid)
                 if (!selectedPair!.isInQueue)
                   ElevatedButton.icon(
-                    onPressed: isValid() && uploadQueueCount < 50
-                        ? () {
-                            Navigator.pop(context, {
-                              'action': 'add',
-                              'stream': dialogStream,
-                              'level': dialogLevel,
-                              'topic': dialogTopic,
-                              'subtopic': dialogSubtopic,
-                              'language': dialogLanguage,
-                              'chapter': dialogChapter,
-                              'type': dialogType,
-                            });
-                          }
-                        : null,
+                    onPressed:
+                        isValid() && isHierarchyValid() && uploadQueueCount < 50
+                            ? () {
+                                Navigator.pop(context, {
+                                  'action': 'add',
+                                  'stream': dialogStream,
+                                  'level': dialogLevel,
+                                  'topic': dialogTopic,
+                                  'subtopic': dialogSubtopic,
+                                  'language': dialogLanguage,
+                                  'chapter': dialogChapter,
+                                  'type': dialogType,
+                                });
+                              }
+                            : null,
                     icon: const Icon(Icons.add_to_queue),
-                    label: Text(
-                        uploadQueueCount >= 50 ? 'Queue Full' : 'Add to Queue'),
+                    label: Text(uploadQueueCount >= 50
+                        ? 'Queue Full'
+                        : !isValid()
+                            ? 'Complete Fields'
+                            : !isHierarchyValid()
+                                ? 'Fix Hierarchy'
+                                : 'Add to Queue'),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: isValid() && uploadQueueCount < 50
+                      backgroundColor: isValid() &&
+                              isHierarchyValid() &&
+                              uploadQueueCount < 50
                           ? Colors.green
                           : Colors.grey,
                       foregroundColor: Colors.white,
@@ -1151,10 +1395,8 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
       },
     );
 
-    // Handle dialog result
-    if (result != null) {
+    if (result != null && !_disposed) {
       if (result['action'] == 'add') {
-        // Update local state
         setState(() {
           selectedStream = result['stream'];
           selectedLevel = result['level'];
@@ -1164,11 +1406,8 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
           selectedChapter = result['chapter'];
           selectedType = result['type'];
         });
-
-        // Add to queue
         await _addToQueue();
       } else if (result['action'] == 'remove') {
-        // Remove from queue
         await _removeFromQueue();
       }
     }
@@ -1228,11 +1467,13 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
           ),
         ),
         onTap: () {
-          setState(() {
-            selectedPair = pair;
-          });
-          _loadMetadataFromQueue();
-          _localDb.updateLastAccessed(pair.questionPair.id!);
+          if (!_disposed) {
+            setState(() {
+              selectedPair = pair;
+            });
+            _loadMetadataFromQueue();
+            _localDb.updateLastAccessed(pair.questionPair.id!);
+          }
         },
       ),
     );
@@ -1280,55 +1521,57 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
         ),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
-          // Database selector button
           IconButton(
             onPressed: _showDatabaseSelector,
             icon: const Icon(Icons.storage),
             tooltip: 'Select Database',
           ),
-          // Create new database button
           IconButton(
             onPressed: _showCreateDatabaseDialog,
             icon: const Icon(Icons.create_new_folder),
             tooltip: 'Create New Database',
           ),
-          // Clear queue button
-          IconButton(
-            onPressed: uploadQueueCount > 0
-                ? () async {
-                    final confirm = await showDialog<bool>(
-                      context: context,
-                      builder: (context) => AlertDialog(
-                        title: const Text('Clear Queue'),
-                        content: Text(
-                            'Remove all $uploadQueueCount items from upload queue?'),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(context, false),
-                            child: const Text('Cancel'),
-                          ),
-                          ElevatedButton(
-                            onPressed: () => Navigator.pop(context, true),
-                            child: const Text('Clear'),
-                          ),
-                        ],
-                      ),
-                    );
-
-                    if (confirm == true) {
-                      await _localDb.clearUploadQueue();
-                      await _loadQuestionPairs();
-                      await _loadUploadQueueCount();
-                      await _loadDatabases();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Upload queue cleared')),
+          if (isUploading)
+            IconButton(
+              onPressed: _cancelUpload,
+              icon: const Icon(Icons.cancel, color: Colors.red),
+              tooltip: 'Cancel Upload',
+            )
+          else
+            IconButton(
+              onPressed: uploadQueueCount > 0
+                  ? () async {
+                      final confirm = await showDialog<bool>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: const Text('Clear Queue'),
+                          content: Text(
+                              'Remove all $uploadQueueCount items from upload queue?'),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, false),
+                              child: const Text('Cancel'),
+                            ),
+                            ElevatedButton(
+                              onPressed: () => Navigator.pop(context, true),
+                              child: const Text('Clear'),
+                            ),
+                          ],
+                        ),
                       );
+
+                      if (confirm == true && !_disposed) {
+                        await _localDb.clearUploadQueue();
+                        await _loadQuestionPairs();
+                        await _loadUploadQueueCount();
+                        await _loadDatabases();
+                        _showSuccessSnackBar('Upload queue cleared');
+                      }
                     }
-                  }
-                : null,
-            icon: const Icon(Icons.clear_all),
-            tooltip: 'Clear Upload Queue',
-          ),
+                  : null,
+              icon: const Icon(Icons.clear_all),
+              tooltip: 'Clear Upload Queue',
+            ),
         ],
       ),
       body: selectedDatabase == null
@@ -1389,7 +1632,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
             )
           : Row(
               children: [
-                // Left Panel - Questions List
                 Expanded(
                   flex: 1,
                   child: Container(
@@ -1399,7 +1641,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                     ),
                     child: Column(
                       children: [
-                        // Header with Search
                         Container(
                           padding: const EdgeInsets.all(12),
                           decoration: BoxDecoration(
@@ -1410,7 +1651,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                           ),
                           child: Column(
                             children: [
-                              // Title and Queue Count
                               Row(
                                 mainAxisAlignment:
                                     MainAxisAlignment.spaceBetween,
@@ -1439,7 +1679,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                                 ],
                               ),
                               const SizedBox(height: 8),
-                              // Search Bar
                               TextField(
                                 controller: _searchController,
                                 decoration: InputDecoration(
@@ -1467,8 +1706,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                             ],
                           ),
                         ),
-
-                        // Questions List with Optimized Scrolling
                         Expanded(
                           child: isLoading
                               ? const Center(child: CircularProgressIndicator())
@@ -1485,11 +1722,9 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                                   : ListView.builder(
                                       controller: _scrollController,
                                       itemCount: filteredQuestionPairs.length,
-                                      itemExtent:
-                                          80, // Fixed height for better performance
+                                      itemExtent: 80,
                                       physics: const BouncingScrollPhysics(),
-                                      cacheExtent:
-                                          1000, // Cache more items for smoother scrolling
+                                      cacheExtent: 1000,
                                       addAutomaticKeepAlives: false,
                                       addRepaintBoundaries: false,
                                       itemBuilder: (context, index) {
@@ -1502,8 +1737,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                     ),
                   ),
                 ),
-
-                // Right Panel - Preview and Configuration
                 Expanded(
                   flex: 2,
                   child: selectedPair == null
@@ -1515,7 +1748,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                         )
                       : Column(
                           children: [
-                            // Preview Header
                             Container(
                               padding: const EdgeInsets.all(12),
                               decoration: BoxDecoration(
@@ -1550,8 +1782,9 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                                     ),
                                   const SizedBox(width: 8),
                                   ElevatedButton.icon(
-                                    onPressed: () =>
-                                        _showMetadataDialog(context),
+                                    onPressed: isUploading
+                                        ? null
+                                        : () => _showMetadataDialog(context),
                                     icon: const Icon(Icons.edit, size: 16),
                                     label: const Text('Configure'),
                                     style: ElevatedButton.styleFrom(
@@ -1566,8 +1799,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                                 ],
                               ),
                             ),
-
-                            // Document Viewer
                             Expanded(
                               child: DocumentViewer(
                                 questionFilePath:
@@ -1576,8 +1807,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                                     selectedPair!.questionPair.answerFilePath,
                               ),
                             ),
-
-                            // Bottom Action Bar
                             Container(
                               padding: const EdgeInsets.all(16),
                               decoration: BoxDecoration(
@@ -1588,7 +1817,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                               ),
                               child: Row(
                                 children: [
-                                  // Database Info
                                   Expanded(
                                     child: Row(
                                       children: [
@@ -1631,8 +1859,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                                       ],
                                     ),
                                   ),
-
-                                  // Upload Progress
                                   if (isUploading) ...[
                                     Expanded(
                                       child: Column(
@@ -1651,9 +1877,16 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                                       ),
                                     ),
                                     const SizedBox(width: 16),
+                                    ElevatedButton.icon(
+                                      onPressed: _cancelUpload,
+                                      icon: const Icon(Icons.cancel),
+                                      label: const Text('Cancel'),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: Colors.red,
+                                        foregroundColor: Colors.white,
+                                      ),
+                                    ),
                                   ],
-
-                                  // Upload Queue Button
                                   if (uploadQueueCount > 0 && !isUploading)
                                     ElevatedButton.icon(
                                       onPressed: _uploadQueue,
@@ -1664,8 +1897,6 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                                         foregroundColor: Colors.white,
                                       ),
                                     ),
-
-                                  // Clear Queue Button
                                   if (uploadQueueCount > 0 && !isUploading) ...[
                                     const SizedBox(width: 8),
                                     IconButton(
@@ -1691,17 +1922,13 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen> {
                                           ),
                                         );
 
-                                        if (confirm == true) {
+                                        if (confirm == true && !_disposed) {
                                           await _localDb.clearUploadQueue();
                                           await _loadQuestionPairs();
                                           await _loadUploadQueueCount();
                                           await _loadDatabases();
-                                          ScaffoldMessenger.of(context)
-                                              .showSnackBar(
-                                            const SnackBar(
-                                                content: Text(
-                                                    'Upload queue cleared')),
-                                          );
+                                          _showSuccessSnackBar(
+                                              'Upload queue cleared');
                                         }
                                       },
                                       icon: const Icon(Icons.clear_all),
