@@ -22,11 +22,40 @@ class _QuestionMetadataFormState extends State<QuestionMetadataForm> {
   List<String> availableTopics = [];
   List<String> availableSubtopics = [];
   List<String> availableChapters = [];
+  List<String> filteredTags = [];
+
+  final TextEditingController _tagSearchController = TextEditingController();
+  String tagSearchQuery = '';
 
   @override
   void initState() {
     super.initState();
     _updateAvailableOptions();
+    _tagSearchController.addListener(_onTagSearchChanged);
+    _updateFilteredTags();
+  }
+
+  @override
+  void dispose() {
+    _tagSearchController.dispose();
+    super.dispose();
+  }
+
+  void _onTagSearchChanged() {
+    setState(() {
+      tagSearchQuery = _tagSearchController.text.toLowerCase();
+      _updateFilteredTags();
+    });
+  }
+
+  void _updateFilteredTags() {
+    if (tagSearchQuery.isEmpty) {
+      filteredTags = List.from(widget.metadataService.tags);
+    } else {
+      filteredTags = widget.metadataService.tags
+          .where((tag) => tag.toLowerCase().contains(tagSearchQuery))
+          .toList();
+    }
   }
 
   void _updateAvailableOptions() {
@@ -98,6 +127,289 @@ class _QuestionMetadataFormState extends State<QuestionMetadataForm> {
     });
     _updateAvailableOptions();
     widget.onMetadataChanged();
+  }
+
+  void _addNewTag() {
+    final newTag = _tagSearchController.text.trim();
+    if (newTag.isNotEmpty && !widget.metadataService.tags.contains(newTag)) {
+      widget.metadataService.addTag(newTag).then((_) {
+        setState(() {
+          _updateFilteredTags();
+          widget.questionModel.addTag(newTag);
+          _tagSearchController.clear();
+        });
+        widget.onMetadataChanged();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Added new tag: "$newTag"'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }).catchError((error) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error adding tag: $error'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      });
+    }
+  }
+
+  void _toggleTag(String tag) {
+    setState(() {
+      widget.questionModel.toggleTag(tag);
+    });
+    widget.onMetadataChanged();
+  }
+
+  Widget _buildTagsSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Tags',
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 8),
+
+        // Tag search and add
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _tagSearchController,
+                decoration: InputDecoration(
+                  labelText: 'Search or add tags',
+                  hintText: 'Type to search existing tags or create new ones',
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                  prefixIcon: const Icon(Icons.search, size: 20),
+                  suffixIcon: _tagSearchController.text.isNotEmpty &&
+                          !widget.metadataService.tags
+                              .contains(_tagSearchController.text.trim())
+                      ? IconButton(
+                          icon: const Icon(Icons.add, size: 20),
+                          onPressed: _addNewTag,
+                          tooltip: 'Add new tag',
+                        )
+                      : null,
+                ),
+                onSubmitted: (value) {
+                  if (value.trim().isNotEmpty) {
+                    if (widget.metadataService.tags.contains(value.trim())) {
+                      _toggleTag(value.trim());
+                      _tagSearchController.clear();
+                    } else {
+                      _addNewTag();
+                    }
+                  }
+                },
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+
+        // Selected tags display
+        if (widget.questionModel.tags.isNotEmpty) ...[
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.blue.shade50,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.blue.shade200),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.label, color: Colors.blue.shade600, size: 16),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Selected Tags (${widget.questionModel.tags.length})',
+                      style: TextStyle(
+                        color: Colors.blue.shade700,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: widget.questionModel.tags.map((tag) {
+                    return Chip(
+                      label: Text(tag, style: const TextStyle(fontSize: 12)),
+                      onDeleted: () => _toggleTag(tag),
+                      deleteIcon: const Icon(Icons.close, size: 16),
+                      backgroundColor: Colors.blue.shade100,
+                      side: BorderSide(color: Colors.blue.shade300),
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+
+        // Available tags
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.grey.shade50,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.grey.shade300),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.local_offer,
+                      color: Colors.grey.shade600, size: 16),
+                  const SizedBox(width: 6),
+                  Text(
+                    tagSearchQuery.isEmpty
+                        ? 'Available Tags (${filteredTags.length})'
+                        : 'Search Results (${filteredTags.length})',
+                    style: TextStyle(
+                      color: Colors.grey.shade700,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
+                    ),
+                  ),
+                  if (tagSearchQuery.isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    IconButton(
+                      icon: const Icon(Icons.clear, size: 16),
+                      onPressed: () {
+                        _tagSearchController.clear();
+                      },
+                      tooltip: 'Clear search',
+                      constraints: const BoxConstraints(),
+                      padding: EdgeInsets.zero,
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 8),
+              if (filteredTags.isEmpty) ...[
+                Text(
+                  tagSearchQuery.isEmpty
+                      ? 'No tags available'
+                      : 'No tags match your search. Press + to create a new tag.',
+                  style: TextStyle(
+                    color: Colors.grey.shade600,
+                    fontSize: 12,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ] else ...[
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 150),
+                  child: SingleChildScrollView(
+                    child: Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: filteredTags.map((tag) {
+                        final isSelected = widget.questionModel.hasTag(tag);
+                        return FilterChip(
+                          label:
+                              Text(tag, style: const TextStyle(fontSize: 12)),
+                          selected: isSelected,
+                          onSelected: (_) => _toggleTag(tag),
+                          backgroundColor: Colors.grey.shade100,
+                          selectedColor: Colors.green.shade100,
+                          checkmarkColor: Colors.green.shade700,
+                          side: BorderSide(
+                            color: isSelected
+                                ? Colors.green.shade300
+                                : Colors.grey.shade400,
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+
+        // Suggested tags based on current metadata
+        if (widget.questionModel.stream != null ||
+            widget.questionModel.level != null) ...[
+          const SizedBox(height: 12),
+          _buildSuggestedTags(),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildSuggestedTags() {
+    final suggestedTags = widget.metadataService.getSuggestedTags(
+      stream: widget.questionModel.stream,
+      level: widget.questionModel.level,
+      topic: widget.questionModel.topic,
+    );
+
+    if (suggestedTags.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.amber.shade50,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.amber.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.auto_awesome, color: Colors.amber.shade600, size: 16),
+              const SizedBox(width: 6),
+              Text(
+                'Suggested Tags',
+                style: TextStyle(
+                  color: Colors.amber.shade700,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 14,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 4,
+            children: suggestedTags.take(6).map((tag) {
+              final isSelected = widget.questionModel.hasTag(tag);
+              return ActionChip(
+                label: Text(tag, style: const TextStyle(fontSize: 11)),
+                onPressed: () => _toggleTag(tag),
+                backgroundColor:
+                    isSelected ? Colors.amber.shade200 : Colors.amber.shade100,
+                side: BorderSide(color: Colors.amber.shade300),
+                avatar: Icon(
+                  isSelected ? Icons.check : Icons.add,
+                  size: 14,
+                  color: Colors.amber.shade700,
+                ),
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -215,7 +527,7 @@ class _QuestionMetadataFormState extends State<QuestionMetadataForm> {
               border: const OutlineInputBorder(),
               isDense: true,
               helperText: widget.questionModel.topic == null
-                  ? 'Select a topic first'
+                  ? 'Select topic first'
                   : 'Available chapters for ${widget.questionModel.topic}',
               enabled: widget.questionModel.topic != null,
             ),
@@ -287,6 +599,10 @@ class _QuestionMetadataFormState extends State<QuestionMetadataForm> {
           ),
           const SizedBox(height: 20),
 
+          // Tags Section
+          _buildTagsSection(),
+          const SizedBox(height: 20),
+
           // Hierarchy Validation Info
           if (widget.questionModel.stream != null &&
               widget.questionModel.topic != null)
@@ -335,6 +651,12 @@ class _QuestionMetadataFormState extends State<QuestionMetadataForm> {
                       style:
                           TextStyle(color: Colors.blue.shade700, fontSize: 12),
                     ),
+                  if (widget.questionModel.hasTags)
+                    Text(
+                      'Tags: ${widget.questionModel.tags.length} selected',
+                      style:
+                          TextStyle(color: Colors.blue.shade700, fontSize: 12),
+                    ),
                 ],
               ),
             ),
@@ -367,16 +689,33 @@ class _QuestionMetadataFormState extends State<QuestionMetadataForm> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(
-                    widget.questionModel.isValid
-                        ? 'All metadata fields completed and hierarchy is valid'
-                        : 'Please fill all metadata fields following the hierarchy',
-                    style: TextStyle(
-                      color: widget.questionModel.isValid
-                          ? Colors.green.shade700
-                          : Colors.orange.shade700,
-                      fontWeight: FontWeight.w500,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.questionModel.isValid
+                            ? 'All metadata fields completed and hierarchy is valid'
+                            : 'Please fill all metadata fields following the hierarchy',
+                        style: TextStyle(
+                          color: widget.questionModel.isValid
+                              ? Colors.green.shade700
+                              : Colors.orange.shade700,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      if (widget.questionModel.hasTags) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          'Tags: ${widget.questionModel.tagsAsString}',
+                          style: TextStyle(
+                            color: widget.questionModel.isValid
+                                ? Colors.green.shade600
+                                : Colors.orange.shade600,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
               ],
@@ -492,6 +831,19 @@ class _QuestionMetadataFormState extends State<QuestionMetadataForm> {
                 widget.onMetadataChanged();
               },
             ),
+
+          const SizedBox(height: 8),
+
+          // Add Tag
+          _buildQuickAddField(
+            'Add New Tag',
+            Icons.label,
+            (value) async {
+              await widget.metadataService.addTag(value);
+              _updateFilteredTags();
+              widget.onMetadataChanged();
+            },
+          ),
         ],
       ),
     );
@@ -592,6 +944,7 @@ class _QuestionMetadataFormState extends State<QuestionMetadataForm> {
       widget.questionModel.language = null;
       widget.questionModel.chapter = null;
       widget.questionModel.type = null;
+      widget.questionModel.clearTags();
     });
     _updateAvailableOptions();
     widget.onMetadataChanged();
@@ -624,6 +977,16 @@ class _QuestionMetadataFormState extends State<QuestionMetadataForm> {
       }
       if (widget.metadataService.types.isNotEmpty) {
         widget.questionModel.type = widget.metadataService.types.first;
+      }
+
+      // Add some suggested tags based on defaults
+      final suggested = widget.metadataService.getSuggestedTags(
+        stream: widget.questionModel.stream,
+        level: widget.questionModel.level,
+        topic: widget.questionModel.topic,
+      );
+      if (suggested.isNotEmpty) {
+        widget.questionModel.addTag(suggested.first);
       }
     });
     widget.onMetadataChanged();

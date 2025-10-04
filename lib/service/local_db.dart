@@ -35,14 +35,68 @@ class LocalDatabaseService {
 
     return await openDatabase(
       fullDbPath,
-      version: 2, // Updated version for PDF support
+      version: 3, // CHANGE: Updated version for tags support
       onCreate: _createTables,
       onUpgrade: _onUpgrade,
     );
   }
 
+  Future<void> updateTagUsage(List<String> tags) async {
+    if (tags.isEmpty) return;
+
+    await ensureDatabaseConnection();
+    final db = await database;
+    final batch = db.batch();
+    final now = DateTime.now().toIso8601String();
+
+    for (final tag in tags) {
+      // Insert or update tag usage
+      batch.rawInsert('''
+        INSERT INTO tag_usage (tag_name, usage_count, last_used, created_at)
+        VALUES (?, 1, ?, ?)
+        ON CONFLICT(tag_name) DO UPDATE SET
+          usage_count = usage_count + 1,
+          last_used = ?
+      ''', [tag, now, now, now]);
+    }
+
+    await batch.commit();
+    debugPrint('Updated usage for ${tags.length} tags');
+  }
+
+  Future<List<Map<String, dynamic>>> getTagUsageStats({int limit = 20}) async {
+    await ensureDatabaseConnection();
+    final db = await database;
+
+    final List<Map<String, dynamic>> maps = await db.query(
+      'tag_usage',
+      orderBy: 'usage_count DESC, last_used DESC',
+      limit: limit,
+    );
+
+    return maps;
+  }
+
+  Future<List<String>> getPopularTags({int limit = 10}) async {
+    final stats = await getTagUsageStats(limit: limit);
+    return stats.map((stat) => stat['tag_name'] as String).toList();
+  }
+
+  Future<List<String>> getRecentTags({int limit = 10}) async {
+    await ensureDatabaseConnection();
+    final db = await database;
+
+    final List<Map<String, dynamic>> maps = await db.query(
+      'tag_usage',
+      orderBy: 'last_used DESC',
+      limit: limit,
+    );
+
+    return maps.map((map) => map['tag_name'] as String).toList();
+  }
+
   Future<void> _createTables(Database db, int version) async {
-    // Question pairs table with PDF support
+    // Question pairs table with PDF support (unchanged)
     await db.execute('''
       CREATE TABLE question_pairs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,7 +120,7 @@ class LocalDatabaseService {
       )
     ''');
 
-    // Upload queue table
+    // MODIFY: Enhanced upload queue table with tags
     await db.execute('''
       CREATE TABLE upload_queue (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,12 +132,13 @@ class LocalDatabaseService {
         language TEXT NOT NULL,
         chapter TEXT NOT NULL,
         type TEXT NOT NULL,
+        tags TEXT DEFAULT '',
         created_at TEXT NOT NULL,
         FOREIGN KEY (question_pair_id) REFERENCES question_pairs (id)
       )
     ''');
 
-    // Database info table
+    // Database info table (unchanged)
     await db.execute('''
       CREATE TABLE database_info (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +151,7 @@ class LocalDatabaseService {
       )
     ''');
 
-    // PDF conversion cache table
+    // PDF conversion cache table (unchanged)
     await db.execute('''
       CREATE TABLE pdf_conversion_cache (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,12 +165,23 @@ class LocalDatabaseService {
       )
     ''');
 
-    debugPrint('Database tables created successfully for: $db');
+    // ADD: New table for tag usage statistics
+    await db.execute('''
+      CREATE TABLE tag_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tag_name TEXT NOT NULL UNIQUE,
+        usage_count INTEGER DEFAULT 0,
+        last_used TEXT,
+        created_at TEXT NOT NULL
+      )
+    ''');
+
+    debugPrint('Database tables created successfully with tags support');
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
-      // Add PDF support columns
+      // Add PDF support columns (existing migration)
       try {
         await db.execute(
             'ALTER TABLE question_pairs ADD COLUMN question_pdf_path TEXT');
@@ -132,7 +198,6 @@ class LocalDatabaseService {
         await db.execute(
             'ALTER TABLE question_pairs ADD COLUMN pdf_converted_at TEXT');
 
-        // Create PDF conversion cache table
         await db.execute('''
           CREATE TABLE pdf_conversion_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,7 +213,29 @@ class LocalDatabaseService {
 
         debugPrint('Database upgraded to version 2 with PDF support');
       } catch (e) {
-        debugPrint('Error during database upgrade: $e');
+        debugPrint('Error during PDF upgrade: $e');
+      }
+    }
+
+    // ADD: Version 3 upgrade for tags support
+    if (oldVersion < 3) {
+      try {
+        await db.execute(
+            'ALTER TABLE upload_queue ADD COLUMN tags TEXT DEFAULT ""');
+
+        await db.execute('''
+          CREATE TABLE tag_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tag_name TEXT NOT NULL UNIQUE,
+            usage_count INTEGER DEFAULT 0,
+            last_used TEXT,
+            created_at TEXT NOT NULL
+          )
+        ''');
+
+        debugPrint('Database upgraded to version 3 with tags support');
+      } catch (e) {
+        debugPrint('Error during tags upgrade: $e');
       }
     }
   }
@@ -701,6 +788,7 @@ class LocalDatabaseService {
         uq.language,
         uq.chapter,
         uq.type,
+        uq.tags,
         uq.created_at as queue_created_at
       FROM question_pairs qp
       LEFT JOIN upload_queue uq ON qp.id = uq.question_pair_id
@@ -727,6 +815,107 @@ class LocalDatabaseService {
     return pairsMap.values.toList();
   }
 
+  Future<List<QuestionPairWithQueue>> searchQuestionPairs({
+    String? query,
+    List<String>? tags,
+    String? stream,
+    String? level,
+    String? topic,
+  }) async {
+    await ensureDatabaseConnection();
+    final db = await database;
+
+    String whereClause = '1=1';
+    List<dynamic> whereArgs = [];
+
+    // Basic text search
+    if (query != null && query.isNotEmpty) {
+      whereClause += ' AND qp.base_name LIKE ?';
+      whereArgs.add('%$query%');
+    }
+
+    // Stream filter
+    if (stream != null && stream.isNotEmpty) {
+      whereClause += ' AND uq.stream = ?';
+      whereArgs.add(stream);
+    }
+
+    // Level filter
+    if (level != null && level.isNotEmpty) {
+      whereClause += ' AND uq.level = ?';
+      whereArgs.add(level);
+    }
+
+    // Topic filter
+    if (topic != null && topic.isNotEmpty) {
+      whereClause += ' AND uq.topic = ?';
+      whereArgs.add(topic);
+    }
+
+    // Tags filter - search for any of the provided tags
+    if (tags != null && tags.isNotEmpty) {
+      final tagConditions = tags.map((_) => 'uq.tags LIKE ?').join(' OR ');
+      whereClause += ' AND ($tagConditions)';
+      for (final tag in tags) {
+        whereArgs.add('%$tag%');
+      }
+    }
+
+    final List<Map<String, dynamic>> maps = await db.rawQuery('''
+      SELECT 
+        qp.*,
+        uq.id as queue_id,
+        uq.stream,
+        uq.level,
+        uq.topic,
+        uq.subtopic,
+        uq.language,
+        uq.chapter,
+        uq.type,
+        uq.tags,
+        uq.created_at as queue_created_at
+      FROM question_pairs qp
+      LEFT JOIN upload_queue uq ON qp.id = uq.question_pair_id
+      WHERE $whereClause
+      ORDER BY qp.upload_count ASC, qp.base_name ASC
+    ''', whereArgs);
+
+    final Map<int, QuestionPairWithQueue> pairsMap = {};
+
+    for (final map in maps) {
+      final pairId = map['id'] as int;
+
+      if (!pairsMap.containsKey(pairId)) {
+        pairsMap[pairId] = QuestionPairWithQueue(
+          questionPair: LocalQuestionPair.fromMap(map),
+          queueItem: null,
+        );
+      }
+
+      if (map['queue_id'] != null) {
+        pairsMap[pairId]!.queueItem = UploadQueueItem.fromMap(map);
+      }
+    }
+
+    return pairsMap.values.toList();
+  }
+
+  Future<void> cleanupTagUsage() async {
+    await ensureDatabaseConnection();
+    final db = await database;
+
+    // Remove tags that haven't been used in the last 90 days
+    final cutoffDate = DateTime.now().subtract(const Duration(days: 90));
+
+    await db.delete(
+      'tag_usage',
+      where: 'last_used < ? AND usage_count < 2',
+      whereArgs: [cutoffDate.toIso8601String()],
+    );
+
+    debugPrint('Cleaned up old tag usage data');
+  }
+
   Future<void> cleanupOldRecords() async {
     await ensureDatabaseConnection();
     final db = await database;
@@ -738,10 +927,12 @@ class LocalDatabaseService {
       whereArgs: [cutoffDate.toIso8601String()],
     );
 
-    // Also cleanup PDF cache
+    // Also cleanup PDF cache and tags
     await cleanupPdfCache();
+    await cleanupTagUsage(); // ADD THIS LINE
 
-    debugPrint('Cleaned up old unused question pairs and PDF cache');
+    debugPrint(
+        'Cleaned up old unused question pairs, PDF cache, and tag usage');
   }
 }
 
@@ -909,6 +1100,7 @@ class UploadQueueItem {
   final String language;
   final String chapter;
   final String type;
+  final List<String> tags; // ADD THIS FIELD
   final DateTime createdAt;
 
   UploadQueueItem({
@@ -921,9 +1113,11 @@ class UploadQueueItem {
     required this.language,
     required this.chapter,
     required this.type,
+    List<String>? tags, // ADD THIS PARAMETER
     required this.createdAt,
-  });
+  }) : tags = tags ?? [];
 
+  // MODIFY toMap() method
   Map<String, dynamic> toMap() {
     return {
       if (id != null) 'id': id,
@@ -935,11 +1129,19 @@ class UploadQueueItem {
       'language': language,
       'chapter': chapter,
       'type': type,
+      'tags': tags.join('|'), // Store as pipe-separated string
       'created_at': createdAt.toIso8601String(),
     };
   }
 
+  // MODIFY fromMap() method
   factory UploadQueueItem.fromMap(Map<String, dynamic> map) {
+    // Parse tags from pipe-separated string
+    final tagsString = map['tags']?.toString() ?? '';
+    final tagsList = tagsString.isEmpty
+        ? <String>[]
+        : tagsString.split('|').where((tag) => tag.isNotEmpty).toList();
+
     return UploadQueueItem(
       id: map['id']?.toInt() ?? map['queue_id']?.toInt(),
       questionPairId: map['question_pair_id']?.toInt() ?? 0,
@@ -950,11 +1152,16 @@ class UploadQueueItem {
       language: map['language']?.toString() ?? '',
       chapter: map['chapter']?.toString() ?? '',
       type: map['type']?.toString() ?? '',
+      tags: tagsList, // ADD THIS LINE
       createdAt: DateTime.parse(map['created_at'] ??
           map['queue_created_at'] ??
           DateTime.now().toIso8601String()),
     );
   }
+
+  // ADD HELPER METHODS
+  String get tagsAsString => tags.join(', ');
+  bool get hasTags => tags.isNotEmpty;
 }
 
 class QuestionPairWithQueue {

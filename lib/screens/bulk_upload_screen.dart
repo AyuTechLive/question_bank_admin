@@ -39,6 +39,7 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
   int uploadQueueCount = 0;
   String searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
+  List<String> selectedTags = [];
 
   // Upload management
   StreamSubscription? _uploadSubscription;
@@ -233,6 +234,7 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
         selectedLanguage = queue.language;
         selectedChapter = queue.chapter;
         selectedType = queue.type;
+        selectedTags = List.from(queue.tags); // ADD THIS LINE
       });
     } else {
       _clearMetadata();
@@ -249,6 +251,7 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
       selectedLanguage = null;
       selectedChapter = null;
       selectedType = null;
+      selectedTags.clear(); // ADD THIS LINE
     });
   }
 
@@ -701,10 +704,17 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
         language: selectedLanguage ?? '',
         chapter: selectedChapter ?? '',
         type: selectedType ?? '',
+        tags: List.from(selectedTags), // ADD THIS LINE
         createdAt: DateTime.now(),
       );
 
       await _localDb.addToUploadQueue(queueItem);
+
+      // ADD TAG USAGE TRACKING
+      if (selectedTags.isNotEmpty) {
+        await _localDb.updateTagUsage(selectedTags);
+      }
+
       if (!_disposed) {
         await _loadQuestionPairs();
         await _loadUploadQueueCount();
@@ -814,6 +824,7 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
             subtopic: queueItem.subtopic,
             language: queueItem.language,
             chapter: queueItem.chapter,
+            tags: queueItem.tags,
             type: queueItem.type,
             questionFilePath: questionPair.questionFilePath,
             answerFilePath: questionPair.answerFilePath,
@@ -894,10 +905,16 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
     String? dialogLanguage = selectedLanguage;
     String? dialogChapter = selectedChapter;
     String? dialogType = selectedType;
+    List<String> dialogTags = List.from(selectedTags);
 
     List<String> availableTopics = [];
     List<String> availableSubtopics = [];
     List<String> availableChapters = [];
+
+    // Tag search and filter
+    final TextEditingController tagSearchController = TextEditingController();
+    String tagSearchQuery = '';
+    List<String> filteredAvailableTags = List.from(_metadataService.tags);
 
     void updateAvailableOptions() {
       availableTopics = _metadataService.getTopicsForStream(dialogStream);
@@ -918,9 +935,19 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
       }
     }
 
+    void updateFilteredTags(String query) {
+      if (query.isEmpty) {
+        filteredAvailableTags = List.from(_metadataService.tags);
+      } else {
+        filteredAvailableTags = _metadataService.tags
+            .where((tag) => tag.toLowerCase().contains(query.toLowerCase()))
+            .toList();
+      }
+    }
+
     updateAvailableOptions();
 
-    final result = await showDialog<Map<String, String?>>(
+    final result = await showDialog<Map<String, dynamic>>(
       context: context,
       barrierDismissible: false,
       builder: (BuildContext context) {
@@ -945,6 +972,354 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
               );
             }
 
+            // Build tags section
+            Widget buildTagsSection() {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Icon(Icons.label,
+                          color: Colors.purple.shade600, size: 16),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Tags (Optional)',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.purple.shade700,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+
+                  // Tag search field (only if not in queue)
+                  if (!selectedPair!.isInQueue) ...[
+                    TextField(
+                      controller: tagSearchController,
+                      decoration: InputDecoration(
+                        labelText: 'Search or add tags',
+                        hintText:
+                            'Type to search existing tags or create new ones',
+                        border: const OutlineInputBorder(),
+                        isDense: true,
+                        prefixIcon: const Icon(Icons.search, size: 18),
+                        suffixIcon: tagSearchController.text.isNotEmpty &&
+                                !_metadataService.tags
+                                    .contains(tagSearchController.text.trim())
+                            ? IconButton(
+                                icon: const Icon(Icons.add, size: 18),
+                                onPressed: () async {
+                                  final newTag =
+                                      tagSearchController.text.trim();
+                                  if (newTag.isNotEmpty) {
+                                    try {
+                                      await _metadataService.addTag(newTag);
+                                      setDialogState(() {
+                                        dialogTags.add(newTag);
+                                        tagSearchController.clear();
+                                        updateFilteredTags('');
+                                      });
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content:
+                                              Text('Added new tag: "$newTag"'),
+                                          duration: const Duration(seconds: 2),
+                                        ),
+                                      );
+                                    } catch (e) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content: Text('Error adding tag: $e'),
+                                          backgroundColor: Colors.red,
+                                        ),
+                                      );
+                                    }
+                                  }
+                                },
+                                tooltip: 'Add new tag',
+                              )
+                            : null,
+                      ),
+                      onChanged: (value) {
+                        setDialogState(() {
+                          tagSearchQuery = value;
+                          updateFilteredTags(value);
+                        });
+                      },
+                      onSubmitted: (value) {
+                        if (value.trim().isNotEmpty) {
+                          if (_metadataService.tags.contains(value.trim())) {
+                            setDialogState(() {
+                              if (!dialogTags.contains(value.trim())) {
+                                dialogTags.add(value.trim());
+                              }
+                              tagSearchController.clear();
+                              updateFilteredTags('');
+                            });
+                          } else {
+                            // Add new tag
+                            _metadataService.addTag(value.trim()).then((_) {
+                              setDialogState(() {
+                                dialogTags.add(value.trim());
+                                tagSearchController.clear();
+                                updateFilteredTags('');
+                              });
+                            });
+                          }
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+
+                  // Selected tags display
+                  if (dialogTags.isNotEmpty) ...[
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.purple.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.purple.shade200),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.local_offer,
+                                  color: Colors.purple.shade600, size: 16),
+                              const SizedBox(width: 6),
+                              Text(
+                                'Selected Tags (${dialogTags.length})',
+                                style: TextStyle(
+                                  color: Colors.purple.shade700,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: dialogTags.map((tag) {
+                              return Chip(
+                                label: Text(tag,
+                                    style: const TextStyle(fontSize: 11)),
+                                onDeleted: selectedPair!.isInQueue
+                                    ? null
+                                    : () {
+                                        setDialogState(() {
+                                          dialogTags.remove(tag);
+                                        });
+                                      },
+                                deleteIcon: selectedPair!.isInQueue
+                                    ? null
+                                    : const Icon(Icons.close, size: 16),
+                                backgroundColor: Colors.purple.shade100,
+                                side: BorderSide(color: Colors.purple.shade300),
+                                materialTapTargetSize:
+                                    MaterialTapTargetSize.shrinkWrap,
+                              );
+                            }).toList(),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+
+                  // Available tags for selection (only if not in queue)
+                  if (!selectedPair!.isInQueue) ...[
+                    Container(
+                      constraints: const BoxConstraints(maxHeight: 150),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.grey.shade300),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.style,
+                                  color: Colors.grey.shade600, size: 16),
+                              const SizedBox(width: 6),
+                              Text(
+                                tagSearchQuery.isEmpty
+                                    ? 'Available Tags (${filteredAvailableTags.length})'
+                                    : 'Search Results (${filteredAvailableTags.length})',
+                                style: TextStyle(
+                                  color: Colors.grey.shade700,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              if (tagSearchQuery.isNotEmpty) ...[
+                                const SizedBox(width: 8),
+                                GestureDetector(
+                                  onTap: () {
+                                    setDialogState(() {
+                                      tagSearchController.clear();
+                                      tagSearchQuery = '';
+                                      updateFilteredTags('');
+                                    });
+                                  },
+                                  child: Icon(Icons.clear,
+                                      size: 16, color: Colors.grey.shade600),
+                                ),
+                              ],
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          if (filteredAvailableTags.isEmpty) ...[
+                            Text(
+                              tagSearchQuery.isEmpty
+                                  ? 'No tags available'
+                                  : 'No tags match your search. Press + to create a new tag.',
+                              style: TextStyle(
+                                color: Colors.grey.shade600,
+                                fontSize: 11,
+                                fontStyle: FontStyle.italic,
+                              ),
+                            ),
+                          ] else ...[
+                            Expanded(
+                              child: SingleChildScrollView(
+                                child: Wrap(
+                                  spacing: 4,
+                                  runSpacing: 4,
+                                  children: filteredAvailableTags.map((tag) {
+                                    final isSelected = dialogTags.contains(tag);
+                                    return FilterChip(
+                                      label: Text(tag,
+                                          style: const TextStyle(fontSize: 10)),
+                                      selected: isSelected,
+                                      onSelected: (selected) {
+                                        setDialogState(() {
+                                          if (selected) {
+                                            if (!dialogTags.contains(tag)) {
+                                              dialogTags.add(tag);
+                                            }
+                                          } else {
+                                            dialogTags.remove(tag);
+                                          }
+                                        });
+                                      },
+                                      materialTapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                      backgroundColor: Colors.grey.shade100,
+                                      selectedColor: Colors.green.shade100,
+                                      checkmarkColor: Colors.green.shade700,
+                                      side: BorderSide(
+                                        color: isSelected
+                                            ? Colors.green.shade300
+                                            : Colors.grey.shade400,
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+
+                  // Suggested tags based on current metadata
+                  if ((dialogStream != null ||
+                          dialogLevel != null ||
+                          dialogTopic != null) &&
+                      !selectedPair!.isInQueue) ...[
+                    const SizedBox(height: 12),
+                    Builder(
+                      builder: (context) {
+                        final suggestedTags = _metadataService.getSuggestedTags(
+                          stream: dialogStream,
+                          level: dialogLevel,
+                          topic: dialogTopic,
+                        );
+
+                        if (suggestedTags.isEmpty)
+                          return const SizedBox.shrink();
+
+                        return Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.amber.shade50,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.amber.shade200),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(Icons.auto_awesome,
+                                      color: Colors.amber.shade600, size: 16),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    'Suggested Tags',
+                                    style: TextStyle(
+                                      color: Colors.amber.shade700,
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 4,
+                                runSpacing: 4,
+                                children: suggestedTags.take(6).map((tag) {
+                                  final isSelected = dialogTags.contains(tag);
+                                  return ActionChip(
+                                    label: Text(tag,
+                                        style: const TextStyle(fontSize: 10)),
+                                    onPressed: () {
+                                      setDialogState(() {
+                                        if (isSelected) {
+                                          dialogTags.remove(tag);
+                                        } else {
+                                          dialogTags.add(tag);
+                                        }
+                                      });
+                                    },
+                                    backgroundColor: isSelected
+                                        ? Colors.amber.shade200
+                                        : Colors.amber.shade100,
+                                    side: BorderSide(
+                                        color: Colors.amber.shade300),
+                                    avatar: Icon(
+                                      isSelected ? Icons.check : Icons.add,
+                                      size: 14,
+                                      color: Colors.amber.shade700,
+                                    ),
+                                    materialTapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  );
+                                }).toList(),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ],
+              );
+            }
+
             return AlertDialog(
               title: Row(
                 children: [
@@ -960,10 +1335,11 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
               ),
               content: SizedBox(
                 width: 600,
-                height: 600,
+                height: 700,
                 child: SingleChildScrollView(
                   child: Column(
                     children: [
+                      // Upload count info
                       if (selectedPair!.questionPair.uploadCount > 0)
                         Container(
                           padding: const EdgeInsets.all(12),
@@ -986,6 +1362,8 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
                             ],
                           ),
                         ),
+
+                      // Hierarchical metadata info
                       Container(
                         padding: const EdgeInsets.all(12),
                         margin: const EdgeInsets.only(bottom: 16),
@@ -1021,6 +1399,8 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
                           ],
                         ),
                       ),
+
+                      // Stream and Level dropdowns
                       Row(
                         children: [
                           Expanded(
@@ -1074,6 +1454,8 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
                         ],
                       ),
                       const SizedBox(height: 16),
+
+                      // Topic dropdown
                       DropdownButtonFormField<String>(
                         value: dialogTopic,
                         decoration: InputDecoration(
@@ -1103,6 +1485,8 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
                                 : null,
                       ),
                       const SizedBox(height: 16),
+
+                      // Subtopic and Chapter dropdowns
                       Row(
                         children: [
                           Expanded(
@@ -1163,6 +1547,8 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
                         ],
                       ),
                       const SizedBox(height: 16),
+
+                      // Language and Type dropdowns
                       Row(
                         children: [
                           Expanded(
@@ -1210,7 +1596,72 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
                           ),
                         ],
                       ),
+
+                      // Tags section
+                      buildTagsSection(),
+
                       const SizedBox(height: 20),
+
+                      // Hierarchy Information
+                      if (dialogStream != null && dialogTopic != null)
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.shade50,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.blue.shade200),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(Icons.info,
+                                      color: Colors.blue.shade600, size: 20),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Current Configuration',
+                                    style: TextStyle(
+                                      color: Colors.blue.shade700,
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              Text('Stream: $dialogStream',
+                                  style: TextStyle(
+                                      color: Colors.blue.shade700,
+                                      fontSize: 12)),
+                              Text('Topic: $dialogTopic',
+                                  style: TextStyle(
+                                      color: Colors.blue.shade700,
+                                      fontSize: 12)),
+                              if (availableSubtopics.isNotEmpty)
+                                Text(
+                                    'Available Subtopics: ${availableSubtopics.length}',
+                                    style: TextStyle(
+                                        color: Colors.blue.shade700,
+                                        fontSize: 12)),
+                              if (availableChapters.isNotEmpty)
+                                Text(
+                                    'Available Chapters: ${availableChapters.length}',
+                                    style: TextStyle(
+                                        color: Colors.blue.shade700,
+                                        fontSize: 12)),
+                              if (dialogTags.isNotEmpty)
+                                Text('Selected Tags: ${dialogTags.length}',
+                                    style: TextStyle(
+                                        color: Colors.blue.shade700,
+                                        fontSize: 12)),
+                            ],
+                          ),
+                        ),
+
+                      const SizedBox(height: 12),
+
+                      // Validation Status
                       Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
@@ -1233,79 +1684,44 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
                               color: isValid() && isHierarchyValid()
                                   ? Colors.green
                                   : Colors.orange,
-                              size: 20,
                             ),
                             const SizedBox(width: 8),
                             Expanded(
-                              child: Text(
-                                isValid() && isHierarchyValid()
-                                    ? 'All metadata fields completed and hierarchy is valid'
-                                    : !isValid()
-                                        ? 'Please fill all metadata fields'
-                                        : 'Invalid hierarchy: Please check your selections',
-                                style: TextStyle(
-                                  color: isValid() && isHierarchyValid()
-                                      ? Colors.green.shade700
-                                      : Colors.orange.shade700,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w500,
-                                ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    isValid() && isHierarchyValid()
+                                        ? 'All metadata fields completed and hierarchy is valid'
+                                        : !isValid()
+                                            ? 'Please fill all required metadata fields'
+                                            : 'Invalid hierarchy: Please check your selections',
+                                    style: TextStyle(
+                                      color: isValid() && isHierarchyValid()
+                                          ? Colors.green.shade700
+                                          : Colors.orange.shade700,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  if (dialogTags.isNotEmpty) ...[
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'Tags: ${dialogTags.join(", ")}',
+                                      style: TextStyle(
+                                        color: isValid() && isHierarchyValid()
+                                            ? Colors.green.shade600
+                                            : Colors.orange.shade600,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ],
                               ),
                             ),
                           ],
                         ),
                       ),
-                      if (dialogStream != null && dialogTopic != null) ...[
-                        const SizedBox(height: 12),
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: Colors.blue.shade50,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: Colors.blue.shade200),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Current Hierarchy:',
-                                style: TextStyle(
-                                  color: Colors.blue.shade700,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 12,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                '$dialogStream → $dialogTopic',
-                                style: TextStyle(
-                                  color: Colors.blue.shade700,
-                                  fontSize: 12,
-                                  fontFamily: 'monospace',
-                                ),
-                              ),
-                              if (dialogSubtopic != null)
-                                Text(
-                                  '  ↳ Subtopic: $dialogSubtopic',
-                                  style: TextStyle(
-                                    color: Colors.blue.shade700,
-                                    fontSize: 11,
-                                    fontFamily: 'monospace',
-                                  ),
-                                ),
-                              if (dialogChapter != null)
-                                Text(
-                                  '  ↳ Chapter: $dialogChapter',
-                                  style: TextStyle(
-                                    color: Colors.blue.shade700,
-                                    fontSize: 11,
-                                    fontFamily: 'monospace',
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ],
+
                       if (selectedPair!.isInQueue) ...[
                         const SizedBox(height: 16),
                         Container(
@@ -1368,6 +1784,7 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
                                   'language': dialogLanguage,
                                   'chapter': dialogChapter,
                                   'type': dialogType,
+                                  'tags': dialogTags,
                                 });
                               }
                             : null,
@@ -1405,78 +1822,13 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
           selectedLanguage = result['language'];
           selectedChapter = result['chapter'];
           selectedType = result['type'];
+          selectedTags = List<String>.from(result['tags'] ?? []);
         });
         await _addToQueue();
       } else if (result['action'] == 'remove') {
         await _removeFromQueue();
       }
     }
-  }
-
-  Widget _buildOptimizedQuestionItem(int index) {
-    final pair = filteredQuestionPairs[index];
-    final isSelected = selectedPair == pair;
-
-    return Container(
-      decoration: BoxDecoration(
-        color: isSelected ? Colors.blue.shade50 : null,
-        border: Border(
-          bottom: BorderSide(color: Colors.grey.shade200),
-        ),
-      ),
-      child: ListTile(
-        dense: true,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        title: Text(
-          pair.questionPair.baseName,
-          style: TextStyle(
-            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-            fontSize: 13,
-          ),
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-        ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Uploaded: ${pair.questionPair.uploadCount} times',
-              style: const TextStyle(fontSize: 11),
-            ),
-            if (pair.isInQueue)
-              Container(
-                margin: const EdgeInsets.only(top: 2),
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                decoration: BoxDecoration(
-                  color: Colors.green,
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: const Text(
-                  'IN QUEUE',
-                  style: TextStyle(color: Colors.white, fontSize: 9),
-                ),
-              ),
-          ],
-        ),
-        leading: CircleAvatar(
-          radius: 16,
-          backgroundColor: pair.isInQueue ? Colors.green : Colors.grey,
-          child: Text(
-            '${pair.questionPair.uploadCount}',
-            style: const TextStyle(color: Colors.white, fontSize: 11),
-          ),
-        ),
-        onTap: () {
-          if (!_disposed) {
-            setState(() {
-              selectedPair = pair;
-            });
-            _loadMetadataFromQueue();
-            _localDb.updateLastAccessed(pair.questionPair.id!);
-          }
-        },
-      ),
-    );
   }
 
   String _formatDate(DateTime date) {
@@ -1943,6 +2295,90 @@ class _EnhancedBulkUploadScreenState extends State<EnhancedBulkUploadScreen>
                 ),
               ],
             ),
+    );
+  }
+
+  Widget _buildOptimizedQuestionItem(int index) {
+    final pair = filteredQuestionPairs[index];
+    final isSelected = selectedPair == pair;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: isSelected ? Colors.blue.shade50 : null,
+        border: Border(
+          bottom: BorderSide(color: Colors.grey.shade200),
+        ),
+      ),
+      child: ListTile(
+        dense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        title: Text(
+          pair.questionPair.baseName,
+          style: TextStyle(
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+            fontSize: 13,
+          ),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Uploaded: ${pair.questionPair.uploadCount} times',
+              style: const TextStyle(fontSize: 11),
+            ),
+            if (pair.isInQueue) ...[
+              Container(
+                margin: const EdgeInsets.only(top: 2),
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                decoration: BoxDecoration(
+                  color: Colors.green,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Text(
+                  'IN QUEUE',
+                  style: TextStyle(color: Colors.white, fontSize: 9),
+                ),
+              ),
+              // Display tags if available
+              if (pair.queueItem?.hasTags == true) ...[
+                const SizedBox(height: 2),
+                Container(
+                  constraints: const BoxConstraints(maxWidth: 200),
+                  child: Text(
+                    'Tags: ${pair.queueItem!.tagsAsString}',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.green.shade700,
+                      fontStyle: FontStyle.italic,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ],
+          ],
+        ),
+        leading: CircleAvatar(
+          radius: 16,
+          backgroundColor: pair.isInQueue ? Colors.green : Colors.grey,
+          child: Text(
+            '${pair.questionPair.uploadCount}',
+            style: const TextStyle(color: Colors.white, fontSize: 11),
+          ),
+        ),
+        onTap: () {
+          if (!_disposed) {
+            setState(() {
+              selectedPair = pair;
+            });
+            _loadMetadataFromQueue();
+            _localDb.updateLastAccessed(pair.questionPair.id!);
+          }
+        },
+      ),
     );
   }
 }

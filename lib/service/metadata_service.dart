@@ -8,6 +8,7 @@ class MetadataService {
   List<String> levels = [];
   List<String> languages = [];
   List<String> types = [];
+  List<String> tags = []; // New independent tags list
 
   // Hierarchical metadata maps
   Map<String, List<String>> streamTopics = {}; // stream -> topics
@@ -20,6 +21,7 @@ class MetadataService {
       loadLevels(),
       loadLanguages(),
       loadTypes(),
+      loadTags(), // Load tags
       loadStreamTopics(),
       loadTopicSubtopics(),
       loadTopicChapters(),
@@ -84,6 +86,36 @@ class MetadataService {
           .collection('metadata')
           .doc('types')
           .set({'values': types});
+    }
+  }
+
+  // Load tags
+  Future<void> loadTags() async {
+    final snapshot = await _firestore.collection('metadata').doc('tags').get();
+    if (snapshot.exists && snapshot.data()?['values'] != null) {
+      tags = List<String>.from(snapshot.data()!['values']);
+    } else {
+      tags = [
+        'JEE 2024',
+        'JEE 2025',
+        'JEE 2026',
+        'NEET 2024',
+        'NEET 2025',
+        'NEET 2026',
+        'Previous Year',
+        'Practice',
+        'Mock Test',
+        'Important',
+        'Revision',
+        'Difficult',
+        'Quick Review',
+        'Formula Based',
+        'Conceptual',
+        'Application Based',
+        'Theory',
+        'Numerical Problem'
+      ];
+      await _firestore.collection('metadata').doc('tags').set({'values': tags});
     }
   }
 
@@ -302,7 +334,82 @@ class MetadataService {
     return allChapters.toList()..sort();
   }
 
-  // Add new items
+  // Tag management methods
+  Future<void> addTag(String value) async {
+    if (!tags.contains(value)) {
+      tags.add(value);
+      tags.sort(); // Keep tags sorted
+      await _firestore.collection('metadata').doc('tags').set({'values': tags});
+    }
+  }
+
+  Future<void> removeTag(String value) async {
+    tags.remove(value);
+    await _firestore.collection('metadata').doc('tags').set({'values': tags});
+  }
+
+  Future<void> reorderTags(List<String> newOrder) async {
+    tags = newOrder;
+    await _firestore.collection('metadata').doc('tags').set({'values': tags});
+  }
+
+  // Get popular tags (tags that are used most frequently in questions)
+  Future<List<String>> getPopularTags({int limit = 10}) async {
+    try {
+      // This would require implementing tag usage tracking in your questions
+      // For now, return the first few tags as "popular"
+      return tags.take(limit).toList();
+    } catch (e) {
+      return tags.take(5).toList(); // Fallback
+    }
+  }
+
+  // Search tags with filtering
+  List<String> searchTags(String query) {
+    if (query.isEmpty) return tags;
+
+    final lowerQuery = query.toLowerCase();
+    return tags.where((tag) => tag.toLowerCase().contains(lowerQuery)).toList();
+  }
+
+  // Get suggested tags based on current metadata
+  List<String> getSuggestedTags({
+    String? stream,
+    String? level,
+    String? topic,
+  }) {
+    List<String> suggestions = [];
+
+    // Add stream-based suggestions
+    if (stream != null) {
+      suggestions.addAll(tags
+          .where((tag) => tag.toLowerCase().contains(stream.toLowerCase())));
+    }
+
+    // Add level-based suggestions
+    if (level != null) {
+      if (level.toLowerCase() == 'hard') {
+        suggestions.addAll(['Difficult', 'Conceptual', 'Application Based']);
+      } else if (level.toLowerCase() == 'easy') {
+        suggestions.addAll(['Quick Review', 'Formula Based', 'Theory']);
+      }
+    }
+
+    // Add topic-based suggestions
+    if (topic != null) {
+      if (topic.toLowerCase().contains('math')) {
+        suggestions.addAll(['Numerical Problem', 'Formula Based']);
+      } else if (topic.toLowerCase().contains('physics')) {
+        suggestions
+            .addAll(['Conceptual', 'Application Based', 'Formula Based']);
+      }
+    }
+
+    // Remove duplicates and ensure they exist in our tags list
+    return suggestions.toSet().where((tag) => tags.contains(tag)).toList();
+  }
+
+  // Add new items (existing methods)
   Future<void> addStream(String value) async {
     if (!streams.contains(value)) {
       streams.add(value);
@@ -405,7 +512,7 @@ class MetadataService {
     }
   }
 
-  // Remove items
+  // Remove items (existing methods)
   Future<void> removeStream(String value) async {
     streams.remove(value);
     await _firestore
@@ -511,6 +618,9 @@ class MetadataService {
       case 'types':
         await addType(value);
         break;
+      case 'tags':
+        await addTag(value);
+        break;
     }
   }
 
@@ -527,6 +637,9 @@ class MetadataService {
         break;
       case 'types':
         await removeType(value);
+        break;
+      case 'tags':
+        await removeTag(value);
         break;
     }
   }
@@ -565,6 +678,7 @@ class MetadataService {
           selectedTopic != null ? getSubtopicsForTopic(selectedTopic) : [],
       'chapters':
           selectedTopic != null ? getChaptersForTopic(selectedTopic) : [],
+      'tags': tags, // All available tags
     };
   }
 }
